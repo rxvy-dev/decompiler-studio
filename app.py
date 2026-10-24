@@ -122,7 +122,7 @@ def main():
             except Exception as e:
                 self.failed.emit(str(e))
 
-    HeaderBar, WelcomeCanvas = theme.make_widgets()
+    HeaderBar, WelcomeCanvas, WorkCanvas = theme.make_widgets()
     UI = {"title_font": None}
 
     class IconProvider(QFileIconProvider):
@@ -361,6 +361,8 @@ def main():
             self.stack.addWidget(self.welcome)
             self.stack.addWidget(self.viewer)
             self.stack.addWidget(self.bigviewer)
+            self.working = WorkCanvas()
+            self.stack.addWidget(self.working)
             self.pathlabel = QLabel("", objectName="pathlabel")
             right = QWidget()
             rv = QVBoxLayout(right)
@@ -459,6 +461,12 @@ def main():
             self.progress.show()
             self.worker = Worker(path, out)
             self.worker.log.connect(self.logbox.appendPlainText)
+            self.worker.log.connect(self.working.feed)
+            self._prev_widget = self.stack.currentWidget()
+            self.pathlabel.hide()
+            self.binbar.hide()
+            self.working.start(Path(path).name)
+            self.stack.setCurrentWidget(self.working)
             self.worker.finished_ok.connect(self.done)
             self.worker.failed.connect(self.fail)
             self.worker.start()
@@ -487,7 +495,39 @@ def main():
             self.tree.show()
             self.tree.setRootIndex(self.model.index(out))
             self.statusBar().showMessage(f"{engines.KIND_LABEL.get(kind, kind)} done - source tree loaded (Report explains what was recovered)")
-            self.expand_first(out)
+            self.working.finish(lambda: self._after_job(lambda: self.expand_first(out)))
+
+        def _after_job(self, show):
+            show()
+            if self.stack.currentWidget() is self.working:      # nothing to open: go back
+                self._leave_working()
+            else:
+                self._fade_in()
+
+        def _fade_in(self):
+            """Fade the result in after the work animation."""
+            from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            w = self.stack.currentWidget()
+            if w is self.working:
+                return
+            eff = QGraphicsOpacityEffect(w)
+            w.setGraphicsEffect(eff)
+            an = QPropertyAnimation(eff, b"opacity", self)
+            an.setDuration(320)
+            an.setStartValue(0.0)
+            an.setEndValue(1.0)
+            an.setEasingCurve(QEasingCurve.OutCubic)
+            an.finished.connect(lambda: w.setGraphicsEffect(None))
+            self._fade_anim = an
+            an.start()
+
+        def _leave_working(self):
+            """Back to what was shown before the job (a cancelled or failed run)."""
+            self.working.stop()
+            if self.stack.currentWidget() is self.working:
+                prev = getattr(self, "_prev_widget", None)
+                self.stack.setCurrentWidget(prev if prev is not None and prev is not self.working else self.welcome)
 
         def expand_first(self, out):
             # open the first source file automatically
@@ -503,6 +543,7 @@ def main():
         def fail(self, msg):
             self.progress.hide()
             self.btn_cancel.hide()
+            self._leave_working()
             if msg == "Cancelled.":
                 self.btn_open.setEnabled(True)
                 self.filelabel.setText("cancelled")
@@ -510,10 +551,10 @@ def main():
                 self.logbox.appendPlainText("Cancelled by user.")
                 return
             self.btn_open.setEnabled(True)
-            self.filelabel.setText("the ritual failed - see log")
+            self.filelabel.setText("failed - see log")
             self.statusBar().showMessage("Failed")
             self.logbox.appendPlainText("ERROR: " + msg)
-            QMessageBox.warning(self, "The ritual failed", msg)
+            QMessageBox.warning(self, "Decompiling failed", msg)
 
         def on_pick(self, idx):
             p = self.model.filePath(idx)
@@ -603,6 +644,11 @@ def main():
             self.btn_open.setEnabled(False)
             self.native_worker = NativeWorker(path, self.out_dir, job)
             self.native_worker.log.connect(self.logbox.appendPlainText)
+            self.native_worker.log.connect(self.working.feed)
+            self._prev_widget = self.stack.currentWidget()
+            self.working.start(Path(path).name, "Extracting assets from" if job == "unity" else "Decompiling")
+            self.binbar.hide()
+            self.stack.setCurrentWidget(self.working)
             self.native_worker.finished_ok.connect(self.native_done)
             self.native_worker.failed.connect(self.native_fail)
             self.native_worker.start()
@@ -614,6 +660,9 @@ def main():
 
         def native_done(self, out):
             self._native_idle()
+            self.working.finish(lambda: self._after_job(lambda: self._native_show(out)))
+
+        def _native_show(self, out):
             unity = Path(out).parent.name == "unity_assets"
             self.statusBar().showMessage("Assets extracted - see the unity_assets folder in the file tree" if unity
                                          else "Binary decompiled - see the native folder in the file tree")
@@ -627,6 +676,7 @@ def main():
 
         def native_fail(self, msg):
             self._native_idle()
+            self._leave_working()
             self.logbox.appendPlainText("ERROR: " + msg if msg != "Cancelled." else "Cancelled by user.")
             self.statusBar().showMessage(msg)
 

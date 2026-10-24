@@ -443,7 +443,288 @@ def make_widgets():
                         p.setBrush(c)
                         p.drawEllipse(gx - 1, gy - 1, 2, 2)
 
-    return HeaderBar, WelcomeCanvas
+    class WorkCanvas(QWidget):
+        """Shown while a file is being decompiled: machine bytes stream in on the left, pass a scanning
+        beam and come out as code on the right. Above: what is being done and for how long; below:
+        the steps (read, unpack, analyse, decompile, tidy) and the latest log line."""
+        STEPS = ("Read", "Unpack", "Analyse", "Decompile", "Tidy", "Done")
+        KEYS = (                                      # log text -> step reached (never goes back)
+            (1, ("jadx", "unpack", "extract", "joined", "apk", "merg", "split", "java code", "dex")),
+            (2, ("importing", "analys", "function start", "building functions", "found ")),
+            (3, ("decompiling", "decompiled", "disassembl", "objects inside", "extracting")),
+            (4, ("readability", "named ", "maincode", "report", "strings", "split into", "flutter app", "unity")),
+            (5, ("done:", "extracted ")),
+        )
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.t = 0.0
+            self.timer = QTimer(self, interval=25)
+            self.timer.timeout.connect(self.tick)
+            self.name, self.verb, self.step, self.frac, self.last = "", "Decompiling", 0, None, ""
+            self.started = 0.0
+            self.finish_t = None
+            self.on_finished = None
+            self.code = WelcomeCanvas.LINES[:-1]
+            import random
+            self.rng = random.Random(3)
+            self.hexrows = [self._hexrow() for _ in range(40)]
+
+        def _hexrow(self):
+            return " ".join(f"{self.rng.randrange(256):02x}" for _ in range(8))
+
+        def start(self, name, verb="Decompiling"):
+            import time
+            self.name, self.verb, self.step, self.frac, self.last = name, verb, 0, None, "starting..."
+            self.started, self.finish_t, self.on_finished = time.monotonic(), None, None
+            self.timer.start()
+            self.update()
+
+        def feed(self, line):
+            low = line.lower()
+            for st, keys in self.KEYS:
+                if st > self.step and any(k in low for k in keys):
+                    self.step, self.frac = st, None
+            import re as _re
+            m = _re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", line)
+            if m and ("decompiling" in low or "building" in low or "extracting" in low):
+                a, b = int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
+                if b:
+                    self.frac = min(1.0, a / b)
+            if line.strip():
+                self.last = line.strip()
+
+        def finish(self, callback=None, ok=True):
+            self.step = 5 if ok else self.step
+            self.finish_t = self.t
+            self.ok = ok
+            self.on_finished = callback
+
+        def stop(self):
+            self.timer.stop()
+
+        def hideEvent(self, e):
+            self.timer.stop()
+            super().hideEvent(e)
+
+        def tick(self):
+            self.t += 0.025
+            if self.finish_t is not None and self.t - self.finish_t > 0.9:
+                cb, self.on_finished, self.finish_t = self.on_finished, None, None
+                self.timer.stop()
+                if cb:
+                    cb()
+                return
+            if int(self.t * 12) != int((self.t - 0.025) * 12):        # new byte row now and then
+                self.hexrows.pop(0)
+                self.hexrows.append(self._hexrow())
+            self.update()
+
+        def paintEvent(self, e):
+            import time
+            from PySide6.QtGui import QFont, QPen
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            w, h = self.width(), self.height()
+            g = QLinearGradient(0, 0, 0, h)
+            g.setColorAt(0, QColor(BG))
+            g.setColorAt(1, QColor(PANEL))
+            p.fillRect(self.rect(), g)
+            rg = QRadialGradient(w / 2, h * 0.5, max(w, h) * 0.55)
+            rg.setColorAt(0, QColor(*HEAT, int(70 + 30 * math.sin(self.t * 2))))
+            rg.setColorAt(1, QColor(*HEAT, 0))
+            p.fillRect(self.rect(), rg)
+            done_p = 0.0 if self.finish_t is None else min(1.0, (self.t - self.finish_t) / 0.6)
+            fade = 1.0 - done_p
+            accent, accent_hi = QColor(RED), QColor(RED_HI)
+
+            # ---- title + phase
+            W = min(w - 60, 860)
+            x0 = (w - W) / 2
+            H = max(160, min(h * 0.40, 320))
+            y0 = h * 0.50 - H / 2
+            tf = QFont(self.font())
+            tf.setPixelSize(26)
+            tf.setBold(True)
+            p.setFont(tf)
+            c = QColor(FG)
+            c.setAlphaF(fade)
+            p.setPen(c)
+            p.drawText(QRectF(0, y0 - 120, w, 36), Qt.AlignHCenter, f"{self.verb} {self.name}")
+            sf = QFont(self.font())
+            sf.setPixelSize(15)
+            p.setFont(sf)
+            secs = int(time.monotonic() - self.started) if self.started else 0
+            phase = self.STEPS[min(self.step, 5)]
+            extra = f"  {int(self.frac * 100)}%" if self.frac is not None and self.step < 5 else ""
+            c = QColor(DIM)
+            c.setAlphaF(fade)
+            p.setPen(c)
+            p.drawText(QRectF(0, y0 - 78, w, 24), Qt.AlignHCenter, f"{phase}{extra}   ·   {secs // 60}:{secs % 60:02d}")
+
+            # ---- the machine: bytes -> beam -> code
+            panel = QRectF(x0, y0, W, H)
+            pc = QColor(CODE_BG)
+            pc.setAlphaF(0.85 * fade)
+            p.setPen(QPen(QColor(LINE), 1))
+            p.setBrush(pc)
+            p.drawRoundedRect(panel, 12, 12)
+            p.save()
+            p.setClipRect(panel.adjusted(1, 1, -1, -1))
+            mono = mono_font(10)
+            mono.setPixelSize(14)
+            p.setFont(mono)
+            lh = 22
+            beam_x = x0 + W * 0.46
+            scroll = (self.t * 12 % 1.0) * lh
+            rows = int(H / lh) + 2
+            for i in range(rows):
+                yy = y0 + 18 + i * lh - scroll
+                txt = self.hexrows[-rows + i] if rows <= len(self.hexrows) else self.hexrows[i % len(self.hexrows)]
+                addr = f"{(int(self.t * 12) + i) * 8:08x}  "
+                edge = 1 - abs((yy - y0) / H - 0.5) * 1.6
+                c = QColor(DIM)
+                c.setAlphaF(max(0.0, min(1.0, edge)) * 0.55 * fade)
+                p.setPen(c)
+                p.drawText(int(x0 + 18), int(yy + 14), addr)
+                c = QColor(RED_HI)
+                c.setAlphaF(max(0.0, min(1.0, edge)) * 0.75 * fade)
+                p.setPen(c)
+                p.drawText(int(x0 + 18 + p.fontMetrics().horizontalAdvance(addr)), int(yy + 14), txt)
+            # code on the right, typed line by line
+            colors = {"kw": SYN["kw"], "fn": SYN["func"], "n": SYN["number"], "p": SYN["punct"]}
+            cx0 = beam_x + 34
+            per = 0.55                                    # seconds per typed line
+            cur_line = int(self.t / per)
+            typed = (self.t % per) / per
+            nvis = int(H / lh)
+            for j in range(nvis):
+                li = cur_line - (nvis - 1) + j
+                if li < 0:
+                    continue
+                line = self.code[li % len(self.code)]
+                yy = y0 + 18 + j * lh
+                full = "".join(tx for _, tx in line)
+                limit = len(full) if j < nvis - 1 else int(len(full) * typed)
+                x = cx0
+                used = 0
+                edge = 1 - abs((yy - y0) / H - 0.5) * 1.5
+                for kind, tx in line:
+                    if used >= limit:
+                        break
+                    part = tx[:max(0, limit - used)]
+                    used += len(tx)
+                    c = QColor(colors.get(kind, SYN["punct"]))
+                    c.setAlphaF(max(0.15, min(1.0, edge)) * fade)
+                    p.setPen(c)
+                    p.drawText(int(x), int(yy + 14), part)
+                    x += p.fontMetrics().horizontalAdvance(part)
+                if j == nvis - 1 and int(self.t * 3) % 2 == 0:
+                    p.fillRect(QRectF(x + 2, yy + 1, 8, 17), QColor(RED_HI))
+            # particles flying from the bytes through the beam into the code
+            for k in range(14):
+                ph = (self.t * 0.7 + k / 14.0) % 1.0
+                py = y0 + 20 + ((k * 37) % 100) / 100 * (H - 40)
+                px = x0 + W * 0.30 + ph * W * 0.36
+                a = math.sin(ph * math.pi)
+                c = QColor(RED_HI)
+                c.setAlphaF(a * 0.9 * fade)
+                p.setPen(Qt.NoPen)
+                p.setBrush(c)
+                r = 2.2 + 1.5 * (1 - abs(px - beam_x) / (W * 0.2))
+                p.drawEllipse(QRectF(px - r, py - r, 2 * r, 2 * r))
+            # the beam
+            bg = QLinearGradient(beam_x - 26, 0, beam_x + 26, 0)
+            bc = QColor(RED_HI)
+            bc.setAlpha(0)
+            bg.setColorAt(0, bc)
+            bc.setAlphaF(0.30 * fade)
+            bg.setColorAt(0.5, bc)
+            bc.setAlpha(0)
+            bg.setColorAt(1, bc)
+            p.fillRect(QRectF(beam_x - 26, y0, 52, H), bg)
+            p.setPen(QPen(QColor(RED_HI), 2))
+            p.drawLine(int(beam_x), int(y0 + 4), int(beam_x), int(y0 + H - 4))
+            sy = y0 + ((math.sin(self.t * 2.4) + 1) / 2) * H
+            sg = QRadialGradient(beam_x, sy, 46)
+            sc_ = QColor(RED_HI)
+            sc_.setAlphaF(0.8 * fade)
+            sg.setColorAt(0, sc_)
+            sc_.setAlpha(0)
+            sg.setColorAt(1, sc_)
+            p.setPen(Qt.NoPen)
+            p.setBrush(sg)
+            p.drawEllipse(QRectF(beam_x - 46, sy - 46, 92, 92))
+            p.restore()
+
+            # ---- steps
+            sy0 = y0 + H + 46
+            n = len(self.STEPS)
+            sx0, sx1 = x0 + 40, x0 + W - 40
+            gap = (sx1 - sx0) / (n - 1)
+            base = QColor(LINE)
+            p.setPen(QPen(base, 3))
+            p.drawLine(int(sx0), int(sy0), int(sx1), int(sy0))
+            reach = min(self.step, n - 1) + (self.frac or 0) * (1 if self.step < n - 1 else 0)
+            if done_p > 0:
+                reach = n - 1
+            p.setPen(QPen(accent, 3))
+            p.drawLine(int(sx0), int(sy0), int(sx0 + gap * reach), int(sy0))
+            sf.setPixelSize(13)
+            p.setFont(sf)
+            for i, nm in enumerate(self.STEPS):
+                cx = sx0 + gap * i
+                active = i == self.step and done_p == 0
+                done = i < self.step or done_p > 0
+                r = 7 + (2.5 * (1 + math.sin(self.t * 6)) if active else 0)
+                if active:
+                    halo = QColor(RED_HI)
+                    halo.setAlpha(60)
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(halo)
+                    p.drawEllipse(QRectF(cx - r - 7, sy0 - r - 7, 2 * r + 14, 2 * r + 14))
+                p.setPen(QPen(accent if (done or active) else base, 2))
+                p.setBrush(accent if done else QColor(PANEL))
+                p.drawEllipse(QRectF(cx - r, sy0 - r, 2 * r, 2 * r))
+                c = QColor(FG if (done or active) else DIM)
+                p.setPen(c)
+                p.drawText(QRectF(cx - 60, sy0 + 14, 120, 20), Qt.AlignHCenter, nm)
+            # latest log line
+            sf.setPixelSize(13)
+            p.setFont(sf)
+            c = QColor(DIM)
+            c.setAlphaF(0.9 * fade)
+            p.setPen(c)
+            last = p.fontMetrics().elidedText(self.last, Qt.ElideRight, int(W))
+            p.drawText(QRectF(x0, sy0 + 48, W, 20), Qt.AlignHCenter, last)
+
+            # ---- finish: ring burst + check mark
+            if done_p > 0:
+                cxm, cym = w / 2, h * 0.5
+                rr = 30 + 160 * done_p
+                rc = QColor(RED_HI)
+                rc.setAlphaF(1 - done_p)
+                p.setPen(QPen(rc, 6 * (1 - done_p) + 1))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QRectF(cxm - rr, cym - rr, 2 * rr, 2 * rr))
+                s = min(1.0, done_p * 2.2)
+                bub = 46 * (1 + 0.15 * math.sin(min(1.0, done_p * 1.6) * math.pi))
+                p.setPen(Qt.NoPen)
+                p.setBrush(accent if getattr(self, "ok", True) else QColor(WARN))
+                p.drawEllipse(QRectF(cxm - bub * s, cym - bub * s, 2 * bub * s, 2 * bub * s))
+                p.setPen(QPen(QColor("#ffffff"), 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                k = min(1.0, max(0.0, (done_p - 0.15) / 0.5))
+                pts = [(cxm - 18, cym + 1), (cxm - 5, cym + 14), (cxm + 20, cym - 13)]
+                if getattr(self, "ok", True) and k > 0:
+                    a1 = min(1.0, k * 2)
+                    p.drawLine(int(pts[0][0]), int(pts[0][1]), int(pts[0][0] + (pts[1][0] - pts[0][0]) * a1),
+                               int(pts[0][1] + (pts[1][1] - pts[0][1]) * a1))
+                    if k > 0.5:
+                        a2 = (k - 0.5) * 2
+                        p.drawLine(int(pts[1][0]), int(pts[1][1]), int(pts[1][0] + (pts[2][0] - pts[1][0]) * a2),
+                                   int(pts[1][1] + (pts[2][1] - pts[1][1]) * a2))
+
+    return HeaderBar, WelcomeCanvas, WorkCanvas
 
 
 apply(DEFAULT_THEME)
