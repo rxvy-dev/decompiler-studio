@@ -839,10 +839,17 @@ def decompile_ghidra(path, out, log):
         log(f"Ghidra needs Java {need} or newer, but the Java found ({java}) is version {have}.")
         return False
     utility = ghidra / "Ghidra" / "Framework" / "Utility" / "lib" / "Utility.jar"
-    if not (ghidra / "Ghidra" / "Features" / "DecompilerStudio" / "lib" / "ds-ghidra.jar").exists():
-        log("Ghidra backend is incomplete (ds-ghidra.jar is missing).")
+    module = ghidra / "Ghidra" / "Features" / "DecompilerStudio"
+    try:                                       # a plain Ghidra (source install, GHIDRA_INSTALL_DIR) gets our module added
+        (module / "lib").mkdir(parents=True, exist_ok=True)
+        if not (module / "Module.manifest").exists():
+            (module / "Module.manifest").write_text("")
+    except OSError:
+        pass
+    expect = ensure_helper(module / "lib" / "ds-ghidra.jar", log)
+    if not (module / "lib" / "ds-ghidra.jar").exists():
+        log("Ghidra backend is incomplete (ds-ghidra.jar is missing and could not be written).")
         return False
-    expect = ensure_helper(ghidra / "Ghidra" / "Features" / "DecompilerStudio" / "lib" / "ds-ghidra.jar", log)
     target = Path(out) / "decompiled.c"
     base_cmd = [
         java,

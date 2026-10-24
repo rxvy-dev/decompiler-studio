@@ -1,0 +1,8 @@
+PySide6-Essentials
+pygments
+capstone
+pefile
+pyelftools
+dnfile
+decompyle3
+uncompyle6

@@ -1,59 +1,86 @@
-Decompiler Studio (Linux x86_64) - run ./decompiler-studio, drop a file on the window.
+# Decompiler Studio
 
-WARNING: USE FOR PERSONAL AND EDUCATIONAL PURPOSES ONLY. Only decompile software you own or have permission to study.
-Java 25, jadx and Ghidra are bundled; nothing to install. Every run writes REPORT.md (Report button) explaining what was recovered.
-Files of any size open in full; files over 1.5 MB are shown without syntax colors so the app stays fast.
+**Drop in an APK, JAR, EXE or ELF. Get a browsable source tree back.**
 
-Buttons: Summon = open a file, Extract = export the recovered source, Banish = cancel the run.
+> ⚠️ **USE FOR PERSONAL AND EDUCATIONAL PURPOSES ONLY.** Only decompile software you own or have permission to study.
 
-Nothing can hang forever: the Banish (cancel) button stops any run (and all helper processes), and:
-  Native (Ghidra): analysis gets up to 10 min and decompiling up to 15 min. When a limit is hit, everything
-                   that finished is kept and written to decompiled.c (the log says how many functions were
-                   not reached). If that produces nothing, Ghidra is retried in quick mode (no analysis step,
-                   10 min). If everything fails you still get the disassembly.
-  Java/APK (jadx): 30 min, then shows whatever it finished.
-  .NET (ilspycmd): 20 min, then shows whatever it finished.
-  Python: 60 s per file; a stuck file gets a bytecode listing and the rest continue.
+![Decompiler Studio welcome screen](docs/welcome.jpg)
 
-APK/DEX/JAR/class     -> Java source
-Windows .exe/.dll, ELF -> decompiled.c (C-like, reconstructed by Ghidra) + types.h + disassembly/ folder
-PyInstaller programs   -> embedded Python modules (source for Python <=3.8, bytecode listing for newer)
-Electron .asar         -> original JavaScript/HTML/CSS files
-.NET .exe/.dll         -> class/method listing (full C# needs ilspycmd)
-.pyc                   -> source for Python <=3.8, else bytecode listing
+A Linux GUI (PySide6) that wraps real decompilers and puts the result in a folder tree with a syntax-highlighted code viewer:
 
-Getting native code closer to the original: a compiled program does not contain its variable names, parameter
-names or struct layouts, so without debug info the C is a reconstruction (param_1, local_58, CubeObject + i * 0x40).
-If it is your own program, build it with -g (and -O0 for the closest match) and open it again: Ghidra then reads the
-debug info and the output uses your real names and structs. The log and REPORT.md tell you when debug info is missing.
-Readability pass: casts are hidden, numbers are decimal, raw float bits become 1.0/0.5, variables are declared where first used,
-x * 1.0 -> x, i + 1 + 24 -> i + 25, for (int i = 0; ...; i++) loops and "} else {" are restored, and gcc's stack-protector check is removed. Without debug info the
-names are still generic (param_1, iVar3, lVar2) and struct fields are still offsets (p[16] instead of cube.x): that is not in the file.
-Compiler start-up code (_start, _init, PLT stubs...) is hidden; set DS_KEEP_BOILERPLATE=1 to see it.
+| You drop in | You get |
+|---|---|
+| Native programs (ELF, EXE, DLL) | C from **Ghidra**, tidied to read like hand-written C, plus disassembly |
+| Android APKs and Java JARs | Java from **jadx**, plus a `maincode/` folder with the app's own code |
+| Unity (IL2CPP) games | every class, field, method and parameter name from the game's metadata (`maincode/unity/`) |
+| Flutter apps | every text string and Dart file path from `libapp.so` (`maincode/flutter/`), so search finds screen text |
+| Python `.pyc`, Electron `.asar` | Python source / unpacked files |
+| .NET assemblies | C# if `ilspycmd` is installed, otherwise a list of the types and methods |
 
-APK / Android: the output has a maincode/ folder with the app's own code (manifest + the app's packages, hard-linked so it costs no
-extra space). Unity IL2CPP games keep their C# in native code, so maincode/unity/ holds a names-only dump read from
-global-metadata.dat: every class, field, property, method and parameter name (e.g. DaysPlayed) plus all string literals.
-Method bodies stay in libil2cpp.so; use Il2CppDumper/Cpp2IL for full types. Obfuscated packages (a/, a0/...) have no original names.
-The app repairs an out-of-date Ghidra helper jar by itself (log shows "helper v5").
+Every run also writes a `REPORT.md` that says what was recovered and what to trust.
 
-Flutter apps: their real code is Dart inside lib/*/libapp.so. maincode/flutter/strings.txt lists every text string found in it
-(screen text like "Drop a flare", class and function names) and dart_files.txt lists the Dart file paths, so search finds them.
-Method bodies are not recoverable that way (use blutter or reFlutter for that).
+## Install (Linux x86_64)
 
-Explain (the Oracle): select some code (or just put the cursor in a function) and press Explain / Ctrl+E. A small AI model explains it
-in plain English. No model is bundled: it uses one running on your own computer, so nothing leaves the machine.
-  Easiest: install Ollama, then  ollama pull qwen2.5-coder:1.5b   (any OpenAI-style server works too: Explain menu > Server address,
-  address ending in /v1, e.g. http://127.0.0.1:8080/v1). Explain menu > Choose model to pick another. Env: DS_LLM_URL, DS_LLM_MODEL.
-  Small models can be wrong: treat it as a hint and check it against the code.
+```bash
+curl -fsSL https://raw.githubusercontent.com/rxvy-dev/decompiler-studio/main/install.sh | bash
+```
 
-Themes: Theme menu -> Evil (main, default), Void, Toxic, Frost, Bone (light). The choice is remembered.
+Then run `decompiler-studio` (or find it in your app menu).
 
-Ghidra notes: big programs take a while (Ghidra analyses first, then decompiles every function; several
-CPU cores are used). It needs RAM: up to 60% of the machine's memory is given to it. Time limits can be
-scaled for slow machines with the environment variable DECOMPILER_STUDIO_GHIDRA_TIMEOUT_SCALE (e.g. 2).
-Ghidra is Apache-2.0 licensed (NSA); its notices are in _internal/backends/ghidra/LICENSE.
+- Needs `python3` (3.9+ with `venv`), `git` and `curl`. No root, nothing system-wide.
+- Downloads jadx, a Java 25 runtime and Ghidra from their official GitHub releases (about 600 MB) into `~/.local/share/decompiler-studio`.
+- Run the same command again to update. Remove it with:
 
-Title font: Metal Mania (SIL Open Font License, see _internal/assets/MetalMania-OFL.txt).
-Windows/macOS builds: push source/ to GitHub; the included workflow builds them (Windows gets Ghidra;
-macOS has no Ghidra decompiler binary, so it falls back to assembly like before).
+```bash
+curl -fsSL https://raw.githubusercontent.com/rxvy-dev/decompiler-studio/main/install.sh | bash -s -- --uninstall
+```
+
+Prefer to read a script before running it? [install.sh](install.sh) is short.
+
+Windows: the GitHub Actions workflow builds a Windows version, or run from source (`pip install -r requirements.txt`, put jadx / Java 25 / Ghidra under `backends/`, `python app.py`).
+
+## What it looks like
+
+Native code, decompiled to C:
+
+![C code view](docs/c-code.jpg)
+
+Java from a JAR/APK, with the progress log open:
+
+![Java view](docs/java.jpg)
+
+### Themes
+
+**Evil** is the main one. Void, Toxic, Frost and Bone (light) are in the **Theme** menu, and your choice is remembered.
+
+![Themes](docs/themes.jpg)
+
+## Features
+
+- **C that reads like C.** Casts hidden, decimal numbers, `x * 1.0` and stack-protector noise removed, variables declared where first used, `for (int i = 0; ...)` loops restored. Without debug info the names stay generic (`param_1`, `iVar3`): build your own programs with `-g -O0` to get your real names back.
+- **`maincode/` for APKs.** The app's own packages, picked out from thousands of library files.
+- **Unity + Flutter.** Their real code is compiled native code, so the app reads the names and strings that survive in it (names only, no method bodies).
+- **Explain (the Oracle).** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
+- **Hunt** through every recovered file at once, drag and drop anywhere, big files open without freezing.
+- Never runs the program you open. It only reads it.
+
+## Honest limits
+
+- Decompiling cannot bring back what the compiler threw away: comments, original variable names (without `-g`), struct layouts, R8/ProGuard-obfuscated names (`a`, `b`, `a0`).
+- Ghidra's output is a best guess. `in_stack_...` variables are arguments Ghidra could not place in the signature.
+- macOS has no Ghidra decompiler binary, so native files fall back to assembly there.
+
+## Build a standalone binary
+
+```bash
+pip install pyinstaller -r requirements.txt   # and put jadx, jre, ghidra under backends/ (see .github/workflows/build.yml)
+python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
+  --add-data "backends/jadx:backends/jadx" --add-data "backends/jre:backends/jre" --add-data "backends/ghidra:backends/ghidra" \
+  --add-data "assets:assets" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp \
+  --hidden-import llm --hidden-import helper_blob --collect-submodules decompyle3 --collect-submodules uncompyle6 \
+  --collect-all xdis --collect-all dnfile app.py
+```
+
+## Credits
+
+[Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6, and the Metal Mania font (SIL Open Font License).
