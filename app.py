@@ -679,11 +679,42 @@ def main():
                                 count += 1
                                 if count >= 500:
                                     break
-                except (UnicodeDecodeError, OSError):
+                except UnicodeDecodeError:
+                    # not text (a library, dex, resources.arsc ...): look for the words inside the bytes
+                    for off, ctx in self._binary_hits(f, ql):
+                        it = QListWidgetItem(f"{f.relative_to(self.out_dir)} @0x{off:x} (binary)  {ctx}")
+                        it.setData(Qt.UserRole, (str(f), 0))
+                        self.results.addItem(it)
+                        count += 1
+                        if count >= 500:
+                            break
+                except OSError:
                     continue
                 if count >= 500:
                     break
             self.statusBar().showMessage(f"{count} match(es)" + (" (showing first 500)" if count >= 500 else ""))
+
+        @staticmethod
+        def _binary_hits(f, ql, limit=5):
+            """Case-insensitive hits of `ql` inside a binary file, as plain text and as UTF-16: [(offset, context)]."""
+            if f.stat().st_size > 400_000_000:
+                return []
+            data = f.read_bytes()
+            low = data.lower()
+            out = []
+            for needle in (ql.encode("utf-8"), ql.encode("utf-16-le")):
+                start = 0
+                while len(out) < limit:
+                    i = low.find(needle, start)
+                    if i < 0:
+                        break
+                    chunk = data[max(0, i - 30): i + len(needle) + 50]
+                    if needle.endswith(b"\x00") or b"\x00" in needle:
+                        chunk = chunk.replace(b"\x00", b"")
+                    text = "".join(chr(c) if 32 <= c < 127 else " " for c in chunk)
+                    out.append((i, " ".join(text.split())[:100]))
+                    start = i + len(needle)
+            return out
 
         def on_result(self, item):
             p, line = item.data(Qt.UserRole)

@@ -80,6 +80,10 @@ def detect(path: str) -> str:
             return "unknown"
         if "AndroidManifest.xml" in names or any(n.endswith(".dex") for n in names):
             return "apk"
+        if ext in (".xapk", ".apkm", ".apks") or (any(n.lower().endswith(".apk") for n in names)
+                                                   and any(n.lower().startswith(("split_config", "config.")) or n.lower() == "base.apk"
+                                                           for n in (x.rsplit("/", 1)[-1] for x in names))):
+            return "apkbundle"
         if any(n.endswith(".class") for n in names):
             return "jar"
         return "zip"
@@ -107,6 +111,7 @@ def _is_dotnet(path: str) -> bool:
 
 KIND_LABEL = {
     "apk": "Android APK",
+    "apkbundle": "Android app bundle (APK splits)",
     "dex": "Android DEX",
     "jar": "Java JAR",
     "class": "Java class",
@@ -273,7 +278,87 @@ def run_cmd(cmd, log, cwd=None, timeout=None, stall=None):
         _PROCS.discard(proc)
 
 
-def decompile_jadx(path, out, log):
+def _safe_rel(name):
+    parts = Path(name).parts
+    return not (name.startswith("/") or ".." in parts)
+
+
+def _merge_split(split, out, log):
+    """Copy the native libraries and assets out of an APK split into out/resources (where jadx puts them)."""
+    res = Path(out) / "resources"
+    n = 0
+    with zipfile.ZipFile(split) as z:
+        for m in z.infolist():
+            name = m.filename
+            if m.is_dir() or not name.startswith(("lib/", "assets/")) or not _safe_rel(name):
+                continue
+            dest = res / name
+            if dest.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(m) as src, open(dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            n += 1
+    log(f"Added {n} native library / asset file(s) from {Path(split).name}.")
+    return n
+
+
+def _sibling_splits(path):
+    p = Path(path)
+    found = []
+    for pat in ("split_config.*.apk", "config.*.apk"):
+        found += [f for f in sorted(p.parent.glob(pat)) if f != p]
+    return found
+
+
+def _finish_apk(out, log):
+    try:
+        for n in apk_insights(out):
+            log("About this app: " + n)
+    except Exception:
+        pass
+    try:
+        if (Path(out) / "resources" / "AndroidManifest.xml").is_file() or any((Path(out) / "resources").rglob("libapp.so")) \
+                or any((Path(out) / "resources").rglob("global-metadata.dat")):
+            build_maincode(out, log)
+    except Exception as e:
+        log(f"(maincode folder skipped: {e})")
+
+
+def decompile_apk_bundle(path, out, log):
+    """.xapk / .apkm / .apks: a zip of base.apk plus split APKs. Decompile the base, then fold in the splits."""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="ds-bundle-"))
+    try:
+        with zipfile.ZipFile(path) as z:
+            apks = [n for n in z.namelist() if n.lower().endswith(".apk") and _safe_rel(n)]
+            for n in apks:
+                z.extract(n, tmp)
+        files = [tmp / n for n in apks]
+        base = next((f for f in files if f.name.lower() == "base.apk"), None) \
+            or max((f for f in files if not f.name.lower().startswith(("split_config", "config."))),
+                   key=lambda f: f.stat().st_size, default=None)
+        if base is None:
+            raise RuntimeError("No base APK found inside this bundle.")
+        log(f"Bundle holds {len(files)} APK(s); base is {base.name}.")
+        decompile_jadx(str(base), out, log, splits=[f for f in files if f != base])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def decompile_jadx(path, out, log, splits=None):
+    if Path(path).suffix.lower() == ".apk":
+        try:
+            with zipfile.ZipFile(path) as z:
+                has_dex = any(n.endswith(".dex") for n in z.namelist())
+        except zipfile.BadZipFile:
+            has_dex = True
+        if not has_dex:
+            # a config split (split_config.arm64_v8a.apk ...): no Java, just native libraries and assets
+            log("This APK has no Java code: it is a split APK that carries native libraries and assets. Extracting them.")
+            _merge_split(path, out, log)
+            _finish_apk(out, log)
+            return
     jadx = find_jadx()
     if not jadx:
         raise RuntimeError("jadx backend not found (expected next to the app in backends/jadx).")
@@ -301,16 +386,15 @@ def decompile_jadx(path, out, log):
             raise RuntimeError("jadx ran out of time before writing any files.")
         raise RuntimeError(f"jadx produced no output (exit {rc}).")
     log(f"jadx finished (exit {rc}); methods it could not recover are marked in the code.")
-    try:
-        for n in apk_insights(out):
-            log("About this app: " + n)
-    except Exception:
-        pass
-    try:
-        if (Path(out) / "resources" / "AndroidManifest.xml").is_file():      # APKs only, not plain jars
-            build_maincode(out, log)
-    except Exception as e:
-        log(f"(maincode folder skipped: {e})")
+    extra = list(splits or [])
+    if not extra and Path(path).suffix.lower() == ".apk":
+        extra = _sibling_splits(path)
+    for sp in extra:
+        try:
+            _merge_split(sp, out, log)
+        except Exception as e:
+            log(f"(could not read {Path(sp).name}: {e})")
+    _finish_apk(out, log)
 
 
 _SDK_ROOTS = {
@@ -497,6 +581,16 @@ def apk_insights(out):
     elif has("Assembly-CSharp.dll"):
         notes.append("This is a Unity game (Mono). The game's code is C# in assets/bin/Data/Managed/Assembly-CSharp.dll: "
                      "drop that file on this window to read it.")
+    src0 = out / "sources"
+    java_has = lambda *parts: src0.joinpath(*parts).is_dir()
+    no_native = not (res / "lib").is_dir() or not any((res / "lib").rglob("*.so"))
+    if no_native and (java_has("io", "flutter") or java_has("com", "unity3d")):
+        notes.append("This APK has no native libraries, but the app needs them: this is a SPLIT APK (installed apps are "
+                     "often split into base.apk plus split_config.arm64_v8a.apk). A Flutter app's Dart code and screen text "
+                     "(libapp.so) or a Unity game's code (libil2cpp.so) live in that other file, so they cannot be found here. "
+                     "Get all the pieces: `adb shell pm path <package>` lists them, `adb pull` each one. Then put them in "
+                     "the same folder as base.apk and open base.apk again (they are merged automatically), or open the "
+                     "split_config file itself.")
     if has("libflutter.so") and has("libapp.so"):
         notes.append("This is a Flutter app. Its real code is Dart, compiled into lib/*/libapp.so, not Java. Its text (screen labels, class and function names) is dumped to maincode/flutter/strings.txt so search can find it.")
     if has("index.android.bundle"):
@@ -1152,6 +1246,8 @@ def decompile(path: str, out_dir: str, log=print) -> str:
     log(f"Detected: {KIND_LABEL.get(kind, kind)}")
     if kind in ("apk", "dex", "jar", "class"):
         decompile_jadx(path, out, log)
+    elif kind == "apkbundle":
+        decompile_apk_bundle(path, out, log)
     elif kind == "zip":
         extract_zip(path, out, log)
     elif kind == "pyc":
