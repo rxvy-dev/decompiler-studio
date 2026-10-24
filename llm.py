@@ -1,4 +1,4 @@
-"""The "Oracle": explains a piece of decompiled code in plain English with a small LOCAL language model.
+"""Explain: explains a piece of decompiled code in plain English with a small LOCAL language model.
 
 No model is bundled (they are 1 GB and up). It talks to a model server running on the same computer:
   * Ollama (default, http://127.0.0.1:11434)  ->  ollama pull qwen2.5-coder:1.5b
