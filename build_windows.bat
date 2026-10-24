@@ -16,6 +16,6 @@ if not exist backends\ghidra (
   rmdir /s /q backends\ghidra\docs backends\ghidra\server backends\ghidra\docker backends\ghidra\Extensions backends\ghidra\Ghidra\Features\Decompiler\os\linux_x86_64
 )
 python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio ^
-  --add-data "backends\jadx;backends\jadx" --add-data "backends\jre;backends\jre" --add-data "backends\ghidra;backends\ghidra" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp --hidden-import llm --hidden-import helper_blob ^
+  --add-data "backends\jadx;backends\jadx" --add-data "backends\jre;backends\jre" --add-data "backends\ghidra;backends\ghidra" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp --hidden-import llm --hidden-import helper_blob --hidden-import unity_assets --collect-all UnityPy --collect-all fmod_toolkit --collect-all texture2ddecoder --collect-all etcpak --collect-all astc_encoder --collect-all tpk_ar --collect-all archspec ^
   --collect-submodules decompyle3 --collect-submodules uncompyle6 --collect-all xdis --collect-all dnfile app.py
 echo Done: dist\decompiler-studio\decompiler-studio.exe

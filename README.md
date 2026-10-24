@@ -60,6 +60,8 @@ Java from a JAR/APK, with the progress log open:
 - **C that reads like C.** Casts hidden, decimal numbers, `x * 1.0` and stack-protector noise removed, variables declared where first used, `for (int i = 0; ...)` loops restored. Without debug info the names stay generic (`param_1`, `iVar3`): build your own programs with `-g -O0` to get your real names back.
 - **`maincode/` for APKs.** The app's own packages, picked out from thousands of library files.
 - **Native libraries inside APKs.** Double-click any `.so` (or `.dll`/`.exe`) in the file tree, or right-click > *Decompile this binary* (Ctrl+D): Ghidra turns it into C under `native/`. ARM64, ARM and x86 all work. Big ones (like `libapp.so`) can take 10-25 minutes.
+- **Unity asset files.** Click a `sharedassets*.assets` / `level*` / `.bundle` file and press **Extract assets**: textures and sprites as PNG, sounds as WAV, models as OBJ, text, fonts and script data as JSON, in `unity_assets/`. `.split0`, `.split1`, ... pieces are joined automatically (uses [UnityPy](https://github.com/K0lb3/UnityPy)).
+- **Code without symbols.** Libraries with no function names (Flutter's `libapp.so`, stripped `.so` files) are searched for function starts, so Ghidra still has code to decompile; huge results are split into `decompiled/part_NNN.c`.
 - **Unity + Flutter.** Their real code is compiled native code, so the app reads the names and strings that survive in it (names only, no method bodies).
 - **Explain.** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
 - **Split APKs.** If `split_config.*.apk` files (or an `.xapk`/`.apkm`/`.apks`) sit next to `base.apk`, they are merged automatically so native code and assets are included.
@@ -79,7 +81,7 @@ pip install pyinstaller -r requirements.txt   # and put jadx, jre, ghidra under 
 python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
   --add-data "backends/jadx:backends/jadx" --add-data "backends/jre:backends/jre" --add-data "backends/ghidra:backends/ghidra" \
   --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp \
-  --hidden-import llm --hidden-import helper_blob --collect-submodules decompyle3 --collect-submodules uncompyle6 \
+  --hidden-import llm --hidden-import helper_blob --hidden-import unity_assets --collect-all UnityPy --collect-all fmod_toolkit --collect-all texture2ddecoder --collect-all etcpak --collect-all astc_encoder --collect-all tpk_ar --collect-all archspec --collect-submodules decompyle3 --collect-submodules uncompyle6 \
   --collect-all xdis --collect-all dnfile app.py
 ```
 
@@ -87,8 +89,8 @@ python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
 
 Decompiler Studio is free software, released under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)). You may use, study, share and change it; if you distribute a modified version, it must stay under the GPL with its source available. There is no warranty.
 
-Bundled/downloaded tools keep their own licenses: Ghidra and jadx (Apache-2.0), Temurin JRE (GPLv2 + Classpath Exception), PySide6 (LGPL-3.0), decompyle3 / uncompyle6 (GPL).
+Bundled/downloaded tools keep their own licenses: Ghidra and jadx (Apache-2.0), Temurin JRE (GPLv2 + Classpath Exception), PySide6 (LGPL-3.0), decompyle3 / uncompyle6 (GPL), UnityPy (MIT).
 
 ## Credits
 
-[Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6.
+[Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6, [UnityPy](https://github.com/K0lb3/UnityPy) (MIT).

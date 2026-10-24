@@ -43,6 +43,14 @@ def main():
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
         return cli(sys.argv[2:])
+    if len(sys.argv) == 4 and sys.argv[1] in ("--extract-assets", "--decompile-binary"):
+        # one file from an already recovered tree: app --extract-assets <file> <tree folder>
+        if sys.argv[1] == "--extract-assets":
+            import unity_assets
+            print(unity_assets.extract(sys.argv[2], sys.argv[3], print))
+        else:
+            print(engines.decompile_embedded(sys.argv[2], sys.argv[3], print))
+        return 0
 
     from PySide6.QtCore import Qt, QThread, Signal, QDir, QSortFilterProxyModel
     from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence
@@ -74,18 +82,40 @@ def main():
             except Exception as e:
                 self.failed.emit(str(e))
 
+    def _looks_binary(head):
+        """NUL bytes, or lots of bytes that are neither text nor UTF-8 (a .split piece of an asset file)."""
+        if b"\x00" in head:
+            return True
+        if not head:
+            return False
+        txt = head.decode("utf-8", errors="replace")
+        bad = txt.count("\ufffd") + sum(1 for ch in txt if ord(ch) < 32 and ch not in "\t\n\r\f\x1b")
+        return bad > len(txt) * 0.05
+
+    def _hexdump(data):
+        rows = []
+        for i in range(0, len(data), 16):
+            row = data[i:i + 16]
+            rows.append(f"{i:08x}  {' '.join(f'{b:02x}' for b in row):<47}  {''.join(chr(b) if 32 <= b < 127 else '.' for b in row)}")
+        return "\n".join(rows)
+
     class NativeWorker(QThread):
         log = Signal(str)
         finished_ok = Signal(str)
         failed = Signal(str)
 
-        def __init__(self, path, root):
+        def __init__(self, path, root, job="native"):
             super().__init__()
-            self.path, self.root = path, root
+            self.path, self.root, self.job = path, root, job
 
         def run(self):
             try:
-                out = engines.decompile_embedded(self.path, self.root, self.log.emit)
+                if self.job == "unity":
+                    import unity_assets
+                    engines.CANCEL.clear()
+                    out = unity_assets.extract(self.path, self.root, self.log.emit, engines.check_cancel)
+                else:
+                    out = engines.decompile_embedded(self.path, self.root, self.log.emit)
                 self.finished_ok.emit(str(out))
             except engines.Cancelled:
                 self.failed.emit("Cancelled.")
@@ -495,24 +525,57 @@ def main():
             if not idx.isValid():
                 return None
             p = self.model.filePath(idx)
-            return p if os.path.isfile(p) and engines.native_magic(p) else None
+            return p if os.path.isfile(p) and self._binary_kind(p) in ("native", "unity") else None
 
         def on_double(self, idx):
             p = self._selected_binary(idx)
             if p:
-                self.decompile_binary(p)
+                self.decompile_binary(p, job=self._binary_kind(p))
 
         def decompile_current(self):
             cur = getattr(self, "cur_file", None)
-            if cur and os.path.isfile(cur[0]) and engines.native_magic(cur[0]):
+            if not (cur and os.path.isfile(cur[0])):
+                return
+            kind = self._binary_kind(cur[0])
+            if kind == "native":
                 self.decompile_binary(cur[0])
+            elif kind == "unity":
+                self.decompile_binary(cur[0], job="unity")
+
+        @staticmethod
+        def _binary_kind(p):
+            if engines.native_magic(p):
+                return "native"
+            try:
+                import unity_assets
+                if unity_assets.is_unity_file(p):
+                    return "unity"
+            except Exception:
+                pass
+            return "data"
+
+        def _show_bar(self, p):
+            kind = self._binary_kind(p)
+            if kind == "native":
+                self.binlabel.setText("Native code (.so / .exe / .dll). Turn it into C with Ghidra:")
+                self.btn_decomp.setText("Decompile this binary")
+                self.btn_decomp.show()
+            elif kind == "unity":
+                self.binlabel.setText("Unity asset file: the game's textures, models, sounds and level data (not code).")
+                self.btn_decomp.setText("Extract assets")
+                self.btn_decomp.show()
+            else:
+                self.binlabel.setText("Data file, not code: there is nothing to decompile. A hex view is shown below.")
+                self.btn_decomp.hide()
+            self.binbar.show()
+            return kind
 
         def decompile_selected(self):
             p = self._selected_binary()
             if p:
-                self.decompile_binary(p)
+                self.decompile_binary(p, job=self._binary_kind(p))
             else:
-                self.statusBar().showMessage("Select a native library (.so, .dll, .exe) in the file tree first")
+                self.statusBar().showMessage("Select a native library (.so, .dll, .exe) or a Unity asset file in the file tree first")
 
         def tree_menu(self, pos):
             from PySide6.QtWidgets import QMenu
@@ -521,21 +584,24 @@ def main():
             if not p:
                 return
             menu = QMenu(self)
-            menu.addAction("Decompile this binary (Ghidra)", lambda: self.decompile_binary(p))
+            if self._binary_kind(p) == "unity":
+                menu.addAction("Extract assets (images, sounds, models)", lambda: self.decompile_binary(p, job="unity"))
+            else:
+                menu.addAction("Decompile this binary (Ghidra)", lambda: self.decompile_binary(p))
             menu.exec(self.tree.viewport().mapToGlobal(pos))
 
-        def decompile_binary(self, path):
+        def decompile_binary(self, path, job="native"):
             if (self.worker and self.worker.isRunning()) or (self.native_worker and self.native_worker.isRunning()):
                 self.statusBar().showMessage("Wait for the current job to finish (or press Cancel)")
                 return
             self.logbox.appendPlainText("")
-            self.statusBar().showMessage(f"Decompiling {Path(path).name}...")
+            self.statusBar().showMessage(("Extracting assets from " if job == "unity" else "Decompiling ") + Path(path).name + "...")
             self.progress.show()
             self.btn_cancel.show()
             self.btn_cancel.setEnabled(True)
             self.btn_log.setChecked(True)
             self.btn_open.setEnabled(False)
-            self.native_worker = NativeWorker(path, self.out_dir)
+            self.native_worker = NativeWorker(path, self.out_dir, job)
             self.native_worker.log.connect(self.logbox.appendPlainText)
             self.native_worker.finished_ok.connect(self.native_done)
             self.native_worker.failed.connect(self.native_fail)
@@ -548,8 +614,10 @@ def main():
 
         def native_done(self, out):
             self._native_idle()
-            self.statusBar().showMessage("Binary decompiled - see the native folder in the file tree")
-            c = Path(out) / "decompiled.c"
+            unity = Path(out).parent.name == "unity_assets"
+            self.statusBar().showMessage("Assets extracted - see the unity_assets folder in the file tree" if unity
+                                         else "Binary decompiled - see the native folder in the file tree")
+            c = Path(out) / ("index.txt" if unity else "decompiled.c")
             target = c if c.exists() else next(iter(sorted(Path(out).rglob("*.asm"))), None) or next(iter(sorted(Path(out).glob("*.txt"))), None)
             if target:
                 self.show_file(str(target))
@@ -699,7 +767,7 @@ def main():
             """A search hit inside a binary: say where it is, show the readable text around it and a hex dump."""
             self.cur_file = (p, None)
             self.pathlabel.show()
-            self.binbar.setVisible(bool(engines.native_magic(p)))
+            self._show_bar(p)
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
             self.pathlabel.setText(f"{rel}  @ 0x{off:x}")
             self.stack.setCurrentWidget(self.viewer)
@@ -756,15 +824,21 @@ def main():
                 self.stack.setCurrentWidget(self.viewer)
                 self.viewer.setPlainText(str(e))
                 return
-            if b"\x00" in head:
+            if _looks_binary(head):
                 self.pathlabel.setText(rel)
-                self.binbar.setVisible(bool(engines.native_magic(p)))
+                kind = self._show_bar(p)
                 self.stack.setCurrentWidget(self.viewer)
-                msg = f"[binary file, {size:,} bytes]"
-                if engines.native_magic(p):
-                    msg += ("\n\nThis is a native program/library. Press the 'Decompile this binary' button above (or double-click it in the\n"
-                            "file tree, or Ctrl+D). Ghidra does the work; big files take a while.\n"
-                            "The result goes into the 'native' folder.")
+                msg = f"[binary file, {size:,} bytes]\n\n"
+                if kind == "native":
+                    msg += ("Press 'Decompile this binary' above (or double-click the file in the tree, or Ctrl+D).\n"
+                            "Ghidra does the work; big files take a while. The result goes into the 'native' folder.\n\n")
+                elif kind == "unity":
+                    msg += ("Press 'Extract assets' above (or double-click the file in the tree, or Ctrl+D) to get its images (PNG),\n"
+                            "sounds (WAV), models (OBJ), text and script data (JSON) in the 'unity_assets' folder.\n"
+                            "Pieces like name.assets.split0, .split1, ... are joined automatically.\n"
+                            "The game's code is not in here: for Unity (IL2CPP) games it is libil2cpp.so, and its class and\n"
+                            "method names are in maincode/unity.\n\n")
+                msg += "First bytes:\n\n" + _hexdump(head[:512])
                 self.viewer.setPlainText(msg)
                 return
             if size > HIGHLIGHT_LIMIT:
