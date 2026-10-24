@@ -1074,6 +1074,61 @@ def decompile_native(path, out, log, kind):
         shutil.move(str(out / "_info.txt"), str(out_real / "_info.txt")) if (out / "_info.txt").exists() else None
 
 
+def native_magic(path):
+    """'elf' / 'pe' if the file is a native binary, else None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return None
+    if head == b"\x7fELF":
+        return "elf"
+    if head[:2] == b"MZ":
+        return "pe"
+    return None
+
+
+def embedded_out_dir(path, root):
+    """Where the decompiled version of a binary found inside a recovered tree goes: <root>/native/<its path>."""
+    root = Path(root)
+    try:
+        rel = Path(path).resolve().relative_to(root.resolve())
+    except ValueError:
+        rel = Path(Path(path).name)
+    parts = [x for x in rel.parts if x not in ("resources", "sources", "maincode")] or [rel.name]
+    return root / "native" / "_".join(parts)
+
+
+def decompile_embedded(path, root, log):
+    """Decompile one native library/executable that was recovered earlier (e.g. resources/lib/arm64-v8a/libfoo.so).
+    Returns the output folder. Does not touch anything else in `root`."""
+    CANCEL.clear()
+    kind = native_magic(path)
+    if kind is None:
+        raise RuntimeError("This file is not a native binary (ELF or PE).")
+    out = embedded_out_dir(path, root)
+    if (out / "decompiled.c").exists():
+        log(f"Already decompiled: {out}")
+        return out
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    size = os.path.getsize(path)
+    log(f"Decompiling {Path(path).name} ({size / 1e6:.1f} MB) with Ghidra...")
+    name = Path(path).name.lower()
+    if name == "libapp.so":
+        log("NOTE: libapp.so is the compiled Dart code of a Flutter app. It has no function names, so you get thousands of "
+            "FUN_xxxx functions of machine-generated C. The readable parts are the text strings, which are already in "
+            "maincode/flutter/strings.txt.")
+    elif name == "libflutter.so":
+        log("NOTE: libflutter.so is the Flutter engine, the same in every Flutter app. It is large and rarely interesting.")
+    if size > 6_000_000:
+        log("This is a big file: Ghidra may take 10-25 minutes. Press Cancel to stop; anything finished is kept.")
+    decompile_native(path, out, log, kind)
+    log(f"Done: {out}")
+    return out
+
+
 def _write_funcs(out, code_bytes, base, funcs, md, log, label):
     fdir = Path(out) / "functions"
     fdir.mkdir(parents=True, exist_ok=True)

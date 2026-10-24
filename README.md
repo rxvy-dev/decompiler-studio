@@ -59,9 +59,11 @@ Java from a JAR/APK, with the progress log open:
 
 - **C that reads like C.** Casts hidden, decimal numbers, `x * 1.0` and stack-protector noise removed, variables declared where first used, `for (int i = 0; ...)` loops restored. Without debug info the names stay generic (`param_1`, `iVar3`): build your own programs with `-g -O0` to get your real names back.
 - **`maincode/` for APKs.** The app's own packages, picked out from thousands of library files.
+- **Native libraries inside APKs.** Double-click any `.so` (or `.dll`/`.exe`) in the file tree, or right-click > *Decompile this binary* (Ctrl+D): Ghidra turns it into C under `native/`. ARM64, ARM and x86 all work. Big ones (like `libapp.so`) can take 10-25 minutes.
 - **Unity + Flutter.** Their real code is compiled native code, so the app reads the names and strings that survive in it (names only, no method bodies).
 - **Explain.** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
-- **Hunt** through every recovered file at once, drag and drop anywhere, big files open without freezing.
+- **Split APKs.** If `split_config.*.apk` files (or an `.xapk`/`.apkm`/`.apks`) sit next to `base.apk`, they are merged automatically so native code and assets are included.
+- **Hunt** through every recovered file at once (text inside binary files too), drag and drop anywhere, big files open without freezing.
 - Never runs the program you open. It only reads it.
 
 ## Honest limits

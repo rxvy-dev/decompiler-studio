@@ -74,6 +74,24 @@ def main():
             except Exception as e:
                 self.failed.emit(str(e))
 
+    class NativeWorker(QThread):
+        log = Signal(str)
+        finished_ok = Signal(str)
+        failed = Signal(str)
+
+        def __init__(self, path, root):
+            super().__init__()
+            self.path, self.root = path, root
+
+        def run(self):
+            try:
+                out = engines.decompile_embedded(self.path, self.root, self.log.emit)
+                self.finished_ok.emit(str(out))
+            except engines.Cancelled:
+                self.failed.emit("Cancelled.")
+            except Exception as e:
+                self.failed.emit(str(e))
+
     HeaderBar, WelcomeCanvas = theme.make_widgets()
     UI = {"title_font": None}
 
@@ -138,6 +156,7 @@ def main():
             m.addAction(a)
             a = QAction("&Extract source to folder...", self, triggered=self.export)
             m.addAction(a)
+            m.addAction(QAction("&Decompile selected binary", self, shortcut="Ctrl+D", triggered=self.decompile_selected))
             a = QAction("&Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
             m.addAction(a)
 
@@ -207,6 +226,10 @@ def main():
             self.treehint = QLabel("Nothing opened yet.\nRecovered folders and files\nwill appear here.",
                                    objectName="hint", alignment=Qt.AlignTop | Qt.AlignLeft)
             self.tree.clicked.connect(self.on_pick)
+            self.tree.doubleClicked.connect(self.on_double)
+            self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.tree.customContextMenuRequested.connect(self.tree_menu)
+            self.native_worker = None
 
             self.search = QLineEdit(placeholderText="Search every recovered file (Enter)...")
             self.search.returnPressed.connect(self.do_search)
@@ -457,6 +480,73 @@ def main():
             if os.path.isfile(p):
                 self.show_file(p)
 
+        def _selected_binary(self, idx=None):
+            idx = idx if idx is not None and idx.isValid() else self.tree.currentIndex()
+            if not idx.isValid():
+                return None
+            p = self.model.filePath(idx)
+            return p if os.path.isfile(p) and engines.native_magic(p) else None
+
+        def on_double(self, idx):
+            p = self._selected_binary(idx)
+            if p:
+                self.decompile_binary(p)
+
+        def decompile_selected(self):
+            p = self._selected_binary()
+            if p:
+                self.decompile_binary(p)
+            else:
+                self.statusBar().showMessage("Select a native library (.so, .dll, .exe) in the file tree first")
+
+        def tree_menu(self, pos):
+            from PySide6.QtWidgets import QMenu
+            idx = self.tree.indexAt(pos)
+            p = self._selected_binary(idx)
+            if not p:
+                return
+            menu = QMenu(self)
+            menu.addAction("Decompile this binary (Ghidra)", lambda: self.decompile_binary(p))
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+        def decompile_binary(self, path):
+            if (self.worker and self.worker.isRunning()) or (self.native_worker and self.native_worker.isRunning()):
+                self.statusBar().showMessage("Wait for the current job to finish (or press Cancel)")
+                return
+            self.logbox.appendPlainText("")
+            self.statusBar().showMessage(f"Decompiling {Path(path).name}...")
+            self.progress.show()
+            self.btn_cancel.show()
+            self.btn_cancel.setEnabled(True)
+            self.btn_log.setChecked(True)
+            self.btn_open.setEnabled(False)
+            self.native_worker = NativeWorker(path, self.out_dir)
+            self.native_worker.log.connect(self.logbox.appendPlainText)
+            self.native_worker.finished_ok.connect(self.native_done)
+            self.native_worker.failed.connect(self.native_fail)
+            self.native_worker.start()
+
+        def _native_idle(self):
+            self.progress.hide()
+            self.btn_cancel.hide()
+            self.btn_open.setEnabled(True)
+
+        def native_done(self, out):
+            self._native_idle()
+            self.statusBar().showMessage("Binary decompiled - see the native folder in the file tree")
+            c = Path(out) / "decompiled.c"
+            target = c if c.exists() else next(iter(sorted(Path(out).rglob("*.asm"))), None) or next(iter(sorted(Path(out).glob("*.txt"))), None)
+            if target:
+                self.show_file(str(target))
+                idx = self.model.index(str(target))
+                self.tree.scrollTo(idx)
+                self.tree.setCurrentIndex(idx)
+
+        def native_fail(self, msg):
+            self._native_idle()
+            self.logbox.appendPlainText("ERROR: " + msg if msg != "Cancelled." else "Cancelled by user.")
+            self.statusBar().showMessage(msg)
+
         def show_report(self):
             if self.out_dir and (Path(self.out_dir) / "REPORT.md").exists():
                 self.show_file(str(Path(self.out_dir) / "REPORT.md"))
@@ -605,7 +695,12 @@ def main():
             if b"\x00" in head:
                 self.pathlabel.setText(rel)
                 self.stack.setCurrentWidget(self.viewer)
-                self.viewer.setPlainText(f"[binary file, {size:,} bytes]")
+                msg = f"[binary file, {size:,} bytes]"
+                if engines.native_magic(p):
+                    msg += ("\n\nThis is a native program/library. To turn it into C code, double-click it in the file tree,\n"
+                            "or right-click it > Decompile this binary (Ctrl+D). Ghidra does the work; big files take a while.\n"
+                            "The result goes into the 'native' folder.")
+                self.viewer.setPlainText(msg)
                 return
             if size > HIGHLIGHT_LIMIT:
                 self.pathlabel.setText(f"{rel}   ({size / 1e6:.1f} MB, syntax colors off for speed)")
