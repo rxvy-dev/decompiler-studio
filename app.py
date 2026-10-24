@@ -1112,6 +1112,10 @@ def main():
                 return
             url, model = self._llm_settings()
             self.oracle.show()
+            sizes = self.rsplit.sizes()
+            if len(sizes) >= 2 and sum(sizes) > 0 and sizes[1] < sum(sizes) * 0.36:
+                total = sum(sizes)
+                self.rsplit.setSizes([int(total * 0.55), int(total * 0.45)] + sizes[2:])
             self.oracle_title.setText(f"{title}: {label}")
             self.oracle_text.setPlainText(("Checking..." if mode == "check" else "Thinking...")
                                           + ("" if llm.is_local(url) else f"\n(the code is being sent to {url})"))

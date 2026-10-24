@@ -36,12 +36,17 @@ SYSTEM = (
 CHECK_SYSTEM = (
     "You are a security reviewer helping someone decide whether a piece of decompiled code is safe to have "
     "on their device. Judge the code you are given; do not write, extend or improve any code.\n"
-    "Answer in this format:\n"
+    "Answer in exactly this format, in plain English a non-expert can follow:\n"
     "Verdict: Clean | Suspicious | Likely malicious\n"
-    "Then 2-6 short bullet points with the reasons, naming the functions or lines they come from. For anything "
-    "that looks risky, also give the ordinary explanation it could have (many normal apps send data to their own "
-    "servers, show ads or use permissions). If the code is too short or unclear to judge, say so and use "
-    "'Suspicious' only when there is a concrete reason. Keep it under 180 words.")
+    "**Why:** 2-4 sentences explaining what the code actually does and why that leads to the verdict.\n"
+    "**What it could do to you:** one or two sentences on the possible harm (or 'Nothing harmful found').\n"
+    "**Evidence:** bullet points, each naming the function or line and what it does there.\n"
+    "**Innocent explanation:** what an ordinary app could be doing with the same code (many normal apps send "
+    "data to their own servers, show ads or ask for permissions).\n"
+    "**How sure:** Low / Medium / High, with one short reason (decompiled names like FUN_xxxx or param_1 hide intent, "
+    "and you only see part of the app).\n"
+    "**Check next:** 1-2 concrete things to look at in the app to confirm or clear it.\n"
+    "Use 'Suspicious' or 'Likely malicious' only for concrete reasons found in the code. Under 300 words.")
 
 
 class LlmError(Exception):
@@ -165,14 +170,15 @@ def stream_explain(code, filename, label, url, model, should_stop=lambda: False,
         raise LlmError(HELP if str(e) == "no_server" else str(e))
     name = choose_model(models, model)
     msgs = build_messages(code, filename, label, mode)
+    limit = 1000 if mode == "check" else 700
     base = url.rstrip("/")
     if _openai_style(url):
-        body = {"model": name, "messages": msgs, "stream": True, "temperature": 0.2, "max_tokens": 700}
+        body = {"model": name, "messages": msgs, "stream": True, "temperature": 0.2, "max_tokens": limit}
         req = urllib.request.Request(base + "/chat/completions", json.dumps(body).encode(),
                                      {"Content-Type": "application/json"})
     else:
         body = {"model": name, "messages": msgs, "stream": True,
-                "options": {"temperature": 0.2, "num_ctx": 8192, "num_predict": 700}}
+                "options": {"temperature": 0.2, "num_ctx": 8192, "num_predict": limit}}
         req = urllib.request.Request(base + "/api/chat", json.dumps(body).encode(),
                                      {"Content-Type": "application/json"})
     try:
