@@ -1,0 +1,72 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Python deps
+        run: pip install PySide6-Essentials pyinstaller pygments capstone pefile pyelftools dnfile decompyle3 uncompyle6
+      - name: Fetch jadx
+        shell: bash
+        run: |
+          mkdir -p backends
+          curl -sSL -o jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.1/jadx-1.5.1.zip
+          python -c "import zipfile; zipfile.ZipFile('jadx.zip').extractall('backends/jadx')"
+          chmod +x backends/jadx/bin/jadx || true
+      - name: Fetch bundled Java (JRE 25, runs jadx and Ghidra)
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   F=OpenJDK25U-jre_x64_linux_hotspot_25.0.4_7.tar.gz ;;
+            macOS)   F=OpenJDK25U-jre_x64_mac_hotspot_25.0.4_7.tar.gz ;;
+            Windows) F=OpenJDK25U-jre_x64_windows_hotspot_25.0.4_7.zip ;;
+          esac
+          curl -sSL -o jre.pkg "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/$F"
+          mkdir -p backends/jre
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python -c "import zipfile; zipfile.ZipFile('jre.pkg').extractall('jre_tmp')"; mv jre_tmp/*/* backends/jre/
+          else
+            tar -xzf jre.pkg -C backends/jre --strip-components=1
+            [ -d backends/jre/Contents/Home ] && cp -r backends/jre/Contents/Home/* backends/jre/ || true
+          fi
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "25" }   # only to compile the small Ghidra helper
+      - name: Fetch bundled Ghidra (C decompiler)
+        shell: bash
+        run: |
+          # Ghidra ships native decompilers for Linux and Windows x86-64 only; macOS builds fall back to assembly.
+          if [ "${{ runner.os }}" != "macOS" ]; then
+            curl -sSL -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.2_build/ghidra_12.2_PUBLIC_20261016.zip"
+            python -c "import zipfile; zipfile.ZipFile('ghidra.zip').extractall('ghidra_tmp')"
+            mkdir -p backends
+            mv ghidra_tmp/ghidra_12.2_PUBLIC backends/ghidra
+            # drop what a decompiler-only bundle never uses
+            rm -rf backends/ghidra/docs backends/ghidra/server backends/ghidra/docker backends/ghidra/Extensions \
+                   backends/ghidra/Ghidra/Features/GhidraServer backends/ghidra/GettingStarted.*
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              rm -rf backends/ghidra/Ghidra/Features/Decompiler/os/linux_x86_64
+            else
+              rm -rf backends/ghidra/Ghidra/Features/Decompiler/os/win_x86_64
+            fi
+            python ghidra_helper/build_helper.py backends/ghidra
+          else
+            mkdir -p backends/ghidra
+          fi
+      - name: Build
+        shell: bash
+        run: |
+          SEP=":"; [ "${{ runner.os }}" = "Windows" ] && SEP=";"
+          python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
+            --add-data "backends/jadx${SEP}backends/jadx" --add-data "backends/jre${SEP}backends/jre" --add-data "assets${SEP}assets" --add-data "backends/ghidra${SEP}backends/ghidra" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp --hidden-import llm --hidden-import helper_blob \
+            --collect-submodules decompyle3 --collect-submodules uncompyle6 \
+            --collect-all xdis --collect-all dnfile app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decompiler-studio-${{ runner.os }}
+          path: dist/decompiler-studio
