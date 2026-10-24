@@ -1163,7 +1163,7 @@ def _dart_names(c, log):
     log("Named Dart's fixed registers (PP = object pool, THR = thread, ...); see the note at the top of the C file.")
 
 
-def _split_big_c(c, log, limit=3_000_000):
+def _split_big_c(c, log, limit=1_200_000):
     """A decompiled.c of tens of MB is too much for one view: split it into decompiled/part_NNN.c
     (cut between functions) and turn decompiled.c into an index of the parts."""
     if c.stat().st_size <= limit:
