@@ -147,9 +147,10 @@ def main():
         finished_ok = Signal()
         failed = Signal(str)
 
-        def __init__(self, code, filename, label, url, model):
+        def __init__(self, code, filename, label, url, model, mode="explain"):
             super().__init__()
             self.args = (code, filename, label, url, model)
+            self.mode = mode
             self._stop = False
 
         def stop(self):
@@ -157,7 +158,7 @@ def main():
 
         def run(self):
             try:
-                for kind, text in llm.stream_explain(*self.args, should_stop=lambda: self._stop):
+                for kind, text in llm.stream_explain(*self.args, should_stop=lambda: self._stop, mode=self.mode):
                     if kind == "model":
                         self.model.emit(text)
                     else:
@@ -194,11 +195,13 @@ def main():
             nm = bar.addMenu("&Go")
             nm.addAction(QAction("Go to &function / offset...", self, shortcut="Ctrl+G", triggered=self.goto_dialog))
             nm.addAction(QAction("Go to &definition of the word under the cursor", self, shortcut="F12", triggered=self.goto_definition))
+            nm.addAction(QAction("&Who calls this?", self, shortcut="Shift+F12", triggered=self.who_calls))
             nm.addAction(QAction("&Back", self, shortcut="Alt+Left", triggered=self.go_back))
             nm.addSeparator()
             nm.addAction(QAction("File &info (hashes, entropy)", self, shortcut="Ctrl+I", triggered=self.file_info))
             em = bar.addMenu("&Explain")
             em.addAction(QAction("&Explain selection / function", self, shortcut="Ctrl+E", triggered=self.explain))
+            em.addAction(QAction("&Check selection / function for malware", self, shortcut="Ctrl+Shift+M", triggered=self.check_malware))
             em.addAction(QAction("Choose &model...", self, triggered=self.pick_model))
             em.addAction(QAction("Server &address...", self, triggered=self.pick_server))
             em.addAction(QAction("&How to set it up", self, triggered=self.explain_help))
@@ -237,13 +240,16 @@ def main():
                                           toolTip="What was recovered, and what to trust")
             self.btn_log = QPushButton("Log", checkable=True, checked=False,
                                        toolTip="Show or hide the progress log")
+            self.btn_check = QPushButton("Malware check", clicked=self.check_malware,
+                                         toolTip="Ask the local AI model whether the selected code (or the function you are "
+                                                 "looking at) looks malicious (Ctrl+Shift+M)")
             self.btn_explain = QPushButton("Explain", clicked=self.explain,
                                            toolTip="Explain the selected code (or the function you are looking at) in plain "
                                                    "English with a small local AI model (Ctrl+E)")
             self.btn_cancel = QPushButton("Cancel", clicked=self.cancel,
                                           toolTip="Cancel: stop the decompile and every helper it started")
             self.btn_cancel.hide()
-            for b in (self.btn_cancel, self.btn_report, self.btn_export, self.btn_explain, self.btn_log, self.btn_open):
+            for b in (self.btn_cancel, self.btn_report, self.btn_export, self.btn_check, self.btn_explain, self.btn_log, self.btn_open):
                 b.setCursor(Qt.PointingHandCursor)
                 hl.addWidget(b)
 
@@ -380,6 +386,9 @@ def main():
             self.history = []                  # (file, line) for Alt+Left
             self.viewer.viewport().installEventFilter(self)
             self.bigviewer.viewport().installEventFilter(self)
+            for v in (self.viewer, self.bigviewer):
+                v.setContextMenuPolicy(Qt.CustomContextMenu)
+                v.customContextMenuRequested.connect(self.viewer_menu)
             self.pathlabel = QLabel("", objectName="pathlabel")
             right = QWidget()
             rv = QVBoxLayout(right)
@@ -779,6 +788,123 @@ def main():
             self._jump(f, line)
             self.statusBar().showMessage(f"{name}" + (f" @ {addr}" if addr else "") + "   (Alt+Left to go back)")
 
+        def _word_at_cursor(self):
+            from PySide6.QtGui import QTextCursor
+            w = self.stack.currentWidget()
+            if not hasattr(w, "textCursor"):
+                return ""
+            c = w.textCursor()
+            if not c.hasSelection():
+                c.select(QTextCursor.WordUnderCursor)
+            return c.selectedText().strip()
+
+        def who_calls(self, name=None):
+            """List every place that calls `name` (or the word under the cursor) with the function it is in."""
+            import re as _re
+            cur = getattr(self, "cur_file", None)
+            name = name or self._word_at_cursor()
+            if not cur or not name or not _re.match(r"^[A-Za-z_$][\w$]*$", name):
+                self.statusBar().showMessage("Put the cursor on a function name first")
+                return
+            p = Path(cur[0])
+            # where to look: all parts of a split decompile, the whole sources/ tree for Java, else this file
+            if p.parent.name == "decompiled" or (p.name == "decompiled.c" and (p.parent / "decompiled").is_dir()):
+                files = self._func_files(p)
+            elif p.suffix in (".java", ".kt", ".cs") and self.out_dir:
+                files = [f for f in Path(self.out_dir).rglob("*" + p.suffix) if f.stat().st_size < 5_000_000]
+            else:
+                files = [p]
+            call = _re.compile(rf"(?<![\w$]){_re.escape(name)}\s*\(")
+            defs = {}
+            for e in self._func_index(cur[0]):
+                defs.setdefault(e[2], []).append((e[3], e[0]))
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            hits = []
+            try:
+                for f in files:
+                    try:
+                        text = f.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if name not in text:
+                        continue
+                    flines = text.split("\n")
+                    fdefs = defs.get(str(f))
+                    if fdefs is None and f.suffix in (".java", ".kt", ".cs"):
+                        fdefs = [(e[3], e[0]) for e in self._func_index(str(f))]
+                    fdefs = sorted(fdefs or [])
+                    for i, line in enumerate(flines, 1):
+                        if not call.search(line):
+                            continue
+                        st = line.strip()
+                        if st.startswith(("//", "*", "/*")):
+                            continue
+                        caller = ""
+                        for dl, dn in fdefs:
+                            if dl <= i:
+                                caller = dn
+                            else:
+                                break
+                        # a declaration or definition ("void foo(", "public int foo(", "undefined8 *FUN_x(") is not a call
+                        m = call.search(line)
+                        prefix = line[:m.start()].strip()
+                        if prefix and _re.fullmatch(r"[\w<>\[\],?@*\s]+", prefix) \
+                                and prefix.split()[-1] not in ("return", "new", "await", "throw", "else", "case", "yield", "do"):
+                            continue
+                        hits.append((str(f), i, caller, st[:110]))
+                        if len(hits) >= 1000:
+                            break
+                    if len(hits) >= 1000:
+                        break
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.results.clear()
+            self.results.show()
+            head = QListWidgetItem(f"Who calls {name}: {len(hits)}{'+' if len(hits) >= 1000 else ''} call site(s)")
+            head.setFlags(Qt.ItemIsEnabled)
+            self.results.addItem(head)
+            for f, i, caller, st in hits:
+                rel = os.path.relpath(f, self.out_dir) if self.out_dir else f
+                it = QListWidgetItem(f"{caller or '?'}  ->  {name}    {Path(rel).name}:{i}   {st}")
+                it.setToolTip(f"{rel}:{i}")
+                it.setData(Qt.UserRole, (f, i))
+                self.results.addItem(it)
+            self.statusBar().showMessage(f"{len(hits)} call site(s) of {name}" + ("" if hits else
+                                         "  (nothing calls it directly; it may be called through a pointer, a table or reflection)"))
+
+        def _func_files(self, p):
+            p = Path(p)
+            if p.name == "decompiled.c" and (p.parent / "decompiled").is_dir():
+                return sorted((p.parent / "decompiled").glob("part_*.c"))
+            return sorted(p.parent.glob("part_*.c"))
+
+        def viewer_menu(self, pos):
+            from PySide6.QtGui import QTextCursor
+            w = self.stack.currentWidget()
+            if not hasattr(w, "cursorForPosition"):
+                return
+            c = w.cursorForPosition(pos)
+            if not w.textCursor().hasSelection() or not w.textCursor().selectedText().strip():
+                c.select(QTextCursor.WordUnderCursor)
+                w.setTextCursor(c)
+            word = self._word_at_cursor()
+            menu = w.createStandardContextMenu(pos) if hasattr(w, "createStandardContextMenu") else None
+            from PySide6.QtWidgets import QMenu
+            menu = menu or QMenu(self)
+            first = menu.actions()[0] if menu.actions() else None
+            acts = []
+            if word and len(word) < 120 and " " not in word:
+                acts = [("Who calls %s?  (Shift+F12)" % word, lambda: self.who_calls(word)),
+                        ("Go to definition of %s  (F12)" % word, lambda: self.goto_definition(word))]
+            acts += [("Explain this  (Ctrl+E)", self.explain), ("Check for malware  (Ctrl+Shift+M)", self.check_malware)]
+            for text, fn in acts:
+                a = QAction(text, menu)
+                a.triggered.connect(fn)
+                menu.insertAction(first, a) if first else menu.addAction(a)
+            if first:
+                menu.insertSeparator(first)
+            menu.exec(w.viewport().mapToGlobal(pos))
+
         def goto_dialog(self):
             from PySide6.QtWidgets import QDialog, QInputDialog
             cur = getattr(self, "cur_file", None)
@@ -962,9 +1088,13 @@ def main():
                 self._save_llm("llm_model", "")
                 self.statusBar().showMessage(f"Explain server: {text.strip()}")
 
-        def explain(self):
+        def check_malware(self):
+            self.explain(mode="check")
+
+        def explain(self, mode="explain"):
             if self.explainer and self.explainer.isRunning():
                 return
+            title = "Malware check" if mode == "check" else "Explain"
             w = self.stack.currentWidget()
             if w is self.welcome or not hasattr(w, "toPlainText"):
                 self.statusBar().showMessage("Open a recovered file first, then select some code and press Explain")
@@ -982,13 +1112,16 @@ def main():
                 return
             url, model = self._llm_settings()
             self.oracle.show()
-            self.oracle_title.setText(f"Explain: {label}")
-            self.oracle_text.setPlainText("Thinking..." + ("" if llm.is_local(url) else f"\n(the code is being sent to {url})"))
+            self.oracle_title.setText(f"{title}: {label}")
+            self.oracle_text.setPlainText(("Checking..." if mode == "check" else "Thinking...")
+                                          + ("" if llm.is_local(url) else f"\n(the code is being sent to {url})"))
             self._oracle_buf = ""
+            self._oracle_mode = mode
             self.btn_explain.setEnabled(False)
+            self.btn_check.setEnabled(False)
             self.btn_oracle_stop.setEnabled(True)
-            self.explainer = ExplainWorker(code, fname, label, url, model)
-            self.explainer.model.connect(lambda m: self.oracle_title.setText(f"Explain: {label}  ({m})"))
+            self.explainer = ExplainWorker(code, fname, label, url, model, mode)
+            self.explainer.model.connect(lambda m: self.oracle_title.setText(f"{title}: {label}  ({m})"))
             self.explainer.piece.connect(self._oracle_piece)
             self.explainer.finished_ok.connect(self._oracle_done)
             self.explainer.failed.connect(self._oracle_failed)
@@ -1002,12 +1135,34 @@ def main():
 
         def _oracle_done(self):
             self.btn_explain.setEnabled(True)
+            self.btn_check.setEnabled(True)
             self.btn_oracle_stop.setEnabled(False)
-            if self._oracle_buf.strip():
+            if not self._oracle_buf.strip():
+                return
+            if getattr(self, "_oracle_mode", "explain") == "check":
+                import re as _re
+                m = _re.search(r"verdict\W*\s*(clean|suspicious|likely malicious|malicious)", self._oracle_buf, _re.I)
+                v = (m.group(1).lower() if m else "")
+                color = {"clean": "#22c55e", "suspicious": "#e3a008"}.get(v, "#ef4444" if v else theme.DIM)
+                head = (f"<div style='font-size:18px;font-weight:800;color:{color}'>{html.escape(m.group(1).title())}</div>"
+                        if m else "")
+                body = _re.sub(r"(?im)^\s*\**verdict\**\W*.*$", "", self._oracle_buf, count=1)
+                self.oracle_text.setMarkdown(body + "\n\n*AI check, not a virus scanner: a small model can miss things "
+                                             "or flag safe code. It only saw this part of the app.*")
+                if head:
+                    from PySide6.QtGui import QTextCursor
+                    c = QTextCursor(self.oracle_text.document())
+                    c.movePosition(QTextCursor.Start)
+                    c.insertHtml(head)
+                    c.insertBlock()
+                if v:
+                    self.statusBar().showMessage(f"Malware check: {m.group(1).title()}")
+            else:
                 self.oracle_text.setMarkdown(self._oracle_buf + "\n\n*AI explanation: a small model can be wrong. Check it against the code.*")
 
         def _oracle_failed(self, msg):
             self.btn_explain.setEnabled(True)
+            self.btn_check.setEnabled(True)
             self.btn_oracle_stop.setEnabled(False)
             self.oracle_title.setText("Explain")
             self.oracle_text.setPlainText(msg)

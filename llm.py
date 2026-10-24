@@ -33,6 +33,17 @@ SYSTEM = (
     "- Do not rewrite the code. Keep it under 200 words.")
 
 
+CHECK_SYSTEM = (
+    "You are a security reviewer helping someone decide whether a piece of decompiled code is safe to have "
+    "on their device. Judge the code you are given; do not write, extend or improve any code.\n"
+    "Answer in this format:\n"
+    "Verdict: Clean | Suspicious | Likely malicious\n"
+    "Then 2-6 short bullet points with the reasons, naming the functions or lines they come from. For anything "
+    "that looks risky, also give the ordinary explanation it could have (many normal apps send data to their own "
+    "servers, show ads or use permissions). If the code is too short or unclear to judge, say so and use "
+    "'Suspicious' only when there is a concrete reason. Keep it under 180 words.")
+
+
 class LlmError(Exception):
     pass
 
@@ -132,17 +143,20 @@ def clip(code):
     return code[:4000] + "\n    /* ... middle of the function left out ... */\n" + code[-1800:], True
 
 
-def build_messages(code, filename, label):
+def build_messages(code, filename, label, mode="explain"):
     code, cut = clip(code)
     ext = os.path.splitext(filename)[1].lower()
     lang = {".c": "C (Ghidra decompiler output)", ".java": "Java (jadx decompiler output)", ".cs": "C# (names only)",
             ".py": "Python", ".smali": "smali", ".asm": "assembly"}.get(ext, "code")
     user = (f"File: {os.path.basename(filename) or 'selection'} - {lang}\nExplaining: {label}\n\n```\n{code}\n```\n"
             + ("(The code was cut to fit the model's size.)\n" if cut else "") + "\nExplain what this does.")
+    if mode == "check":
+        user = user.replace("\nExplain what this does.", "\nIs this code safe or does it look malicious?")
+        return [{"role": "system", "content": CHECK_SYSTEM}, {"role": "user", "content": user}]
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
-def stream_explain(code, filename, label, url, model, should_stop=lambda: False):
+def stream_explain(code, filename, label, url, model, should_stop=lambda: False, mode="explain"):
     """Yield the model's answer piece by piece. Raises LlmError with a readable message."""
     url = url or DEFAULT_URL
     try:
@@ -150,7 +164,7 @@ def stream_explain(code, filename, label, url, model, should_stop=lambda: False)
     except LlmError as e:
         raise LlmError(HELP if str(e) == "no_server" else str(e))
     name = choose_model(models, model)
-    msgs = build_messages(code, filename, label)
+    msgs = build_messages(code, filename, label, mode)
     base = url.rstrip("/")
     if _openai_style(url):
         body = {"model": name, "messages": msgs, "stream": True, "temperature": 0.2, "max_tokens": 700}
