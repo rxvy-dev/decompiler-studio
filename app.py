@@ -123,6 +123,23 @@ def main():
             except Exception as e:
                 self.failed.emit(str(e))
 
+    class AiInstallWorker(QThread):
+        log = Signal(str)
+        finished_ok = Signal(str)
+        failed = Signal(str)
+
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def run(self):
+            try:
+                self.finished_ok.emit(llm.install_ai(self.log.emit, self.model, engines.check_cancel))
+            except engines.Cancelled:
+                self.failed.emit("Cancelled.")
+            except Exception as e:
+                self.failed.emit(str(e))
+
     HeaderBar, WelcomeCanvas, WorkCanvas = theme.make_widgets()
     UI = {"title_font": None}
 
@@ -202,6 +219,7 @@ def main():
             em = bar.addMenu("&Explain")
             em.addAction(QAction("&Explain selection / function", self, shortcut="Ctrl+E", triggered=self.explain))
             em.addAction(QAction("&Check selection / function for malware", self, shortcut="Ctrl+Shift+M", triggered=self.check_malware))
+            em.addAction(QAction("&Install AI model...", self, triggered=self.install_ai))
             em.addAction(QAction("Choose &model...", self, triggered=self.pick_model))
             em.addAction(QAction("Server &address...", self, triggered=self.pick_server))
             em.addAction(QAction("&How to set it up", self, triggered=self.explain_help))
@@ -1055,6 +1073,49 @@ def main():
             except Exception:
                 pass
 
+        def install_ai(self):
+            from PySide6.QtWidgets import QInputDialog
+            if getattr(self, "ai_worker", None) and self.ai_worker.isRunning():
+                return
+            rec = llm.recommended_model()
+            choices = [f"{llm.BIG_MODEL}   (about 9 GB, best; needs a 12 GB+ graphics card or lots of RAM)",
+                       f"{llm.SMALL_MODEL}   (about 4.7 GB, good; runs on most computers)",
+                       "qwen2.5-coder:3b   (about 1.9 GB, fast but rough)"]
+            cur = 0 if rec == llm.BIG_MODEL else 1
+            item, ok = QInputDialog.getItem(self, "Install AI model",
+                                            "Model for Explain and Malware check. It is downloaded once and runs only on "
+                                            "this computer.\nRecommended for this computer: " + rec, choices, cur, False)
+            if not ok:
+                return
+            model = item.split()[0]
+            engines.CANCEL.clear()
+            self.btn_log.setChecked(True)
+            self.progress.show()
+            self.btn_cancel.show()
+            self.btn_cancel.setEnabled(True)
+            self.statusBar().showMessage(f"Installing {model}...")
+            self.ai_worker = AiInstallWorker(model)
+            self.ai_worker.log.connect(self.logbox.appendPlainText)
+            self.ai_worker.log.connect(lambda m: self.statusBar().showMessage(m))
+            self.ai_worker.finished_ok.connect(self._ai_installed)
+            self.ai_worker.failed.connect(self._ai_failed)
+            self.ai_worker.start()
+
+        def _ai_installed(self, model):
+            self.progress.hide()
+            self.btn_cancel.hide()
+            self._save_llm("llm_model", model)
+            self.statusBar().showMessage(f"AI ready: {model}")
+            QMessageBox.information(self, "Install AI model", f"{model} is installed. Explain (Ctrl+E) and Malware check "
+                                                             "(Ctrl+Shift+M) now use it.")
+
+        def _ai_failed(self, msg):
+            self.progress.hide()
+            self.btn_cancel.hide()
+            self.logbox.appendPlainText("AI install: " + msg)
+            if msg != "Cancelled.":
+                QMessageBox.warning(self, "Install AI model", msg)
+
         def explain_help(self):
             self.oracle.show()
             self.oracle_title.setText("Explain: setup")
@@ -1064,6 +1125,8 @@ def main():
         def pick_model(self):
             from PySide6.QtWidgets import QInputDialog
             url, model = self._llm_settings()
+            if url.rstrip("/") == llm.DEFAULT_URL:
+                llm.start_server()
             try:
                 names = [n for n, _ in llm.list_models(url)]
             except llm.LlmError as e:
@@ -1131,13 +1194,19 @@ def main():
             self.explainer.failed.connect(self._oracle_failed)
             self.explainer.start()
 
+        @staticmethod
+        def _no_think(t):
+            import re as _re
+            return _re.sub(r"(?s)<think>.*?(</think>|$)", "", t).lstrip()
+
         def _oracle_piece(self, t):
             self._oracle_buf += t
-            self.oracle_text.setPlainText(self._oracle_buf)
+            self.oracle_text.setPlainText(self._no_think(self._oracle_buf) or "Thinking...")
             sb = self.oracle_text.verticalScrollBar()
             sb.setValue(sb.maximum())
 
         def _oracle_done(self):
+            self._oracle_buf = self._no_think(self._oracle_buf)
             self.btn_explain.setEnabled(True)
             self.btn_check.setEnabled(True)
             self.btn_oracle_stop.setEnabled(False)
@@ -1387,6 +1456,10 @@ def main():
 
         def closeEvent(self, e):
             engines.cancel_all()
+            try:
+                llm.stop_server()
+            except Exception:
+                pass
             if self.explainer and self.explainer.isRunning():
                 self.explainer.stop()
                 self.explainer.wait(2000)

@@ -2,9 +2,12 @@
 # Decompiler Studio installer (Linux x86_64).
 #   install / update:  curl -fsSL https://raw.githubusercontent.com/rxvy-dev/decompiler-studio/main/install.sh | bash
 #   uninstall:         curl -fsSL https://raw.githubusercontent.com/rxvy-dev/decompiler-studio/main/install.sh | bash -s -- --uninstall
+#   without the AI model:                                                                       ... | bash -s -- --no-ai
+#   pick the AI model yourself:                                                                 ... | bash -s -- --model=qwen2.5-coder:7b
 # Installs into ~/.local/share/decompiler-studio (override with DS_DIR) and puts `decompiler-studio` in ~/.local/bin.
 # Needs: python3 (3.9+ with venv), git, curl. It downloads jadx, a Java 25 runtime and Ghidra (about 600 MB) from
-# their official GitHub releases; nothing is installed system-wide and no root is needed.
+# their official GitHub releases, plus Ollama and the Qwen2.5-Coder model for Explain / Malware check (4.7 GB, or
+# about 9 GB on a 12 GB+ graphics card). Nothing is installed system-wide and no root is needed.
 set -euo pipefail
 
 DIR="${DS_DIR:-$HOME/.local/share/decompiler-studio}"
@@ -17,7 +20,16 @@ GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/G
 say() { printf '\033[1;31m[decompiler-studio]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[decompiler-studio] %s\033[0m\n' "$*" >&2; exit 1; }
 
-if [ "${1:-}" = "--uninstall" ]; then
+NO_AI=0; MODEL=""; UNINSTALL=0
+for a in "$@"; do
+  case "$a" in
+    --uninstall) UNINSTALL=1 ;;
+    --no-ai) NO_AI=1 ;;
+    --model=*) MODEL="${a#--model=}" ;;
+  esac
+done
+
+if [ "$UNINSTALL" = 1 ]; then
   rm -rf "$DIR" "$BIN/decompiler-studio" "$HOME/.local/share/applications/decompiler-studio.desktop" \
          "$HOME/.local/share/icons/decompiler-studio.png"
   say "removed."
@@ -116,6 +128,15 @@ Icon=$HOME/.local/share/icons/decompiler-studio.png
 Terminal=false
 Categories=Development;
 DESK
+
+# ---- 5. the AI model for Explain / Malware check (a private Ollama + Qwen2.5-Coder)
+if [ "$NO_AI" = 1 ]; then
+  say "skipping the AI model (--no-ai). Add it later from the app: Explain > Install AI model."
+else
+  say "installing the AI model for Explain / Malware check (several GB, one time; skip with --no-ai)..."
+  "$DIR/venv/bin/python" "$APP/llm.py" --install ${MODEL:+--model=$MODEL} \
+    || say "the AI model was not installed; the app works without it (Explain > Install AI model to retry)."
+fi
 
 say "done. Run:  decompiler-studio   (or find it in your app menu)"
 case ":$PATH:" in *":$BIN:"*) ;; *) say "add $BIN to your PATH to run it by name: export PATH=\"$BIN:\$PATH\"";; esac

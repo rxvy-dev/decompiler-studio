@@ -2,8 +2,9 @@
 # Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Explain: explains a piece of decompiled code in plain English with a small LOCAL language model.
 
-No model is bundled (they are 1 GB and up). It talks to a model server running on the same computer:
-  * Ollama (default, http://127.0.0.1:11434)  ->  ollama pull qwen2.5-coder:1.5b
+It talks to a model server running on the same computer:
+  * Ollama (default, http://127.0.0.1:11434). The installer (or Explain > Install AI model) puts a private copy
+    of Ollama and Qwen2.5-Coder in ~/.local/share/decompiler-studio/ai; the app starts it when needed.
   * any OpenAI-compatible server (llama.cpp's llama-server, LM Studio, ...): set the address to
     something ending in /v1, e.g. http://127.0.0.1:8080/v1
 The code is sent only to the address you configure; with the default it never leaves the machine.
@@ -15,10 +16,39 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
 DEFAULT_URL = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "qwen2.5-coder:1.5b"
-PREFERRED = ("qwen2.5-coder:1.5b", "qwen2.5-coder:3b", "qwen2.5-coder", "deepseek-coder", "codegemma",
-             "llama3.2:1b", "llama3.2", "qwen2.5")
+BIG_MODEL, SMALL_MODEL = "qwen2.5-coder:14b", "qwen2.5-coder:7b"
+PREFERRED = ("qwen2.5-coder:14b", "qwen2.5-coder:7b", "qwen2.5-coder:32b", "qwen2.5-coder:latest", "qwen2.5-coder:3b",
+             "qwen2.5-coder:1.5b", "qwen2.5-coder", "deepseek-coder", "codegemma", "llama3.2", "qwen2.5")
+AI_DIR = Path(os.environ.get("DS_AI_DIR") or Path.home() / ".local" / "share" / "decompiler-studio" / "ai")
+OLLAMA_URL = "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
+
+
+def gpu_memory_mb():
+    """Total memory of the biggest NVIDIA card in MB (0 if none or unknown)."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return 0
+    try:
+        out = subprocess.run([smi, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return max(int(x) for x in out.split() if x.strip().isdigit())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def recommended_model():
+    """Qwen2.5-Coder 14B (about 9 GB) on a 12 GB+ graphics card, otherwise 7B (about 4.7 GB)."""
+    return BIG_MODEL if gpu_memory_mb() >= 11500 else SMALL_MODEL
+
+
+DEFAULT_MODEL = SMALL_MODEL
 MAX_CHARS = 6000
 
 SYSTEM = (
@@ -76,10 +106,9 @@ def _open(req, timeout):
         raise LlmError("no_server")
 
 
-HELP = ("No local model server answered. Easiest setup:\n"
-        "  1. install Ollama (https://ollama.com)\n"
-        "  2. run:  ollama pull qwen2.5-coder:1.5b\n"
-        "  3. press Explain again\n"
+HELP = ("No local AI model is installed yet. Easiest: Explain menu > Install AI model (downloads Ollama and "
+        "Qwen2.5-Coder into the app's own folder, no root needed).\n"
+        "Or install Ollama yourself (https://ollama.com) and run:  ollama pull qwen2.5-coder:7b\n"
         "Another server works too (llama.cpp, LM Studio): Explain menu > Server address, and use an address "
         "ending in /v1, for example http://127.0.0.1:8080/v1")
 
@@ -114,7 +143,8 @@ def choose_model(models, wanted=""):
                 return n
     if names:
         return min(models, key=lambda m: m[1] or 1 << 60)[0]      # smallest installed model
-    raise LlmError("The server has no models installed.\nInstall one with:  ollama pull " + DEFAULT_MODEL)
+    raise LlmError("The model server has no models yet. Use Explain menu > Install AI model, or run:  ollama pull "
+                   + recommended_model())
 
 
 def pick_chunk(text, line):
@@ -167,7 +197,11 @@ def stream_explain(code, filename, label, url, model, should_stop=lambda: False,
     try:
         models = list_models(url)
     except LlmError as e:
-        raise LlmError(HELP if str(e) == "no_server" else str(e))
+        if str(e) != "no_server":
+            raise
+        if not (url.rstrip("/") == DEFAULT_URL and start_server()):
+            raise LlmError(HELP)
+        models = list_models(url)
     name = choose_model(models, model)
     msgs = build_messages(code, filename, label, mode)
     limit = 1000 if mode == "check" else 700
@@ -214,3 +248,164 @@ def stream_explain(code, filename, label, url, model, should_stop=lambda: False,
         raise LlmError(HELP if str(e) == "no_server" else str(e))
     except (OSError, ValueError) as e:
         raise LlmError(f"The model server stopped answering: {e}")
+
+
+# ---------------------------------------------------------------- private Ollama + model install
+_SERVER = None
+
+
+def ollama_bin():
+    """The app's own Ollama, else one installed on the system."""
+    own = AI_DIR / "ollama" / "bin" / "ollama"
+    if own.is_file():
+        return str(own)
+    return shutil.which("ollama")
+
+
+def server_up(url=DEFAULT_URL):
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def start_server(wait=25):
+    """Start Ollama in the background if it is not running. True when it answers."""
+    global _SERVER
+    if server_up():
+        return True
+    exe = ollama_bin()
+    if not exe:
+        return False
+    env = dict(os.environ, OLLAMA_HOST="127.0.0.1:11434")
+    if exe.startswith(str(AI_DIR)):
+        env["OLLAMA_MODELS"] = str(AI_DIR / "models")
+    AI_DIR.mkdir(parents=True, exist_ok=True)
+    logf = open(AI_DIR / "server.log", "ab")
+    _SERVER = subprocess.Popen([exe, "serve"], env=env, stdout=logf, stderr=logf, start_new_session=True)
+    for _ in range(wait * 4):
+        if server_up():
+            return True
+        if _SERVER.poll() is not None:
+            break
+        time.sleep(0.25)
+    return False
+
+
+def stop_server():
+    """Stop the Ollama this app started (not one the user runs themselves)."""
+    global _SERVER
+    if _SERVER and _SERVER.poll() is None:
+        _SERVER.terminate()
+        try:
+            _SERVER.wait(5)
+        except subprocess.TimeoutExpired:
+            _SERVER.kill()
+    _SERVER = None
+
+
+def _download(url, dest, log, check=lambda: None):
+    req = urllib.request.Request(url, headers={"User-Agent": "decompiler-studio"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        got, shown = 0, -1
+        while True:
+            check()
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            pct = int(got * 100 / total) if total else -1
+            if pct >= 0 and pct // 5 != shown:
+                shown = pct // 5
+                log(f"Downloading Ollama: {pct}% of {total / 1e9:.1f} GB")
+
+
+def _untar_zst(arc, dest):
+    """Unpack a .tar.zst with Python (no 'zstd' program needed), refusing paths that leave `dest`."""
+    import tarfile
+    dest = Path(dest).resolve()
+    try:
+        import zstandard
+    except ImportError:
+        r = subprocess.run(["tar", "--zstd", "-xf", str(arc), "-C", str(dest)], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise LlmError("Could not unpack Ollama: install the 'zstd' package or 'pip install zstandard'. "
+                           + r.stderr[-200:])
+        return
+    with open(arc, "rb") as f, zstandard.ZstdDecompressor().stream_reader(f) as reader, \
+            tarfile.open(fileobj=reader, mode="r|") as t:
+        for m in t:
+            target = (dest / m.name).resolve()
+            if not str(target).startswith(str(dest)) or m.issym() and os.path.isabs(m.linkname):
+                continue
+            t.extract(m, dest, filter="tar") if sys.version_info >= (3, 12) else t.extract(m, dest)
+
+
+def install_ai(log=print, model=None, check=lambda: None):
+    """Get Ollama (a private copy, unless one is already installed) and pull the model. Returns the model name."""
+    model = model or recommended_model()
+    gpu = gpu_memory_mb()
+    log(f"AI model: {model}" + (f" (graphics card with {gpu // 1024} GB found)" if gpu else " (no NVIDIA card found: "
+        "it runs on the CPU, slower but fine)"))
+    if not ollama_bin():
+        if sys.platform != "linux":
+            raise LlmError("Automatic install is for Linux. On other systems install Ollama from https://ollama.com "
+                           f"and run:  ollama pull {model}")
+        AI_DIR.mkdir(parents=True, exist_ok=True)
+        arc = AI_DIR / "ollama-linux-amd64.tar.zst"
+        log("Downloading Ollama (the program that runs the model) from its GitHub releases...")
+        _download(OLLAMA_URL, arc, log, check)
+        dest = AI_DIR / "ollama"
+        dest.mkdir(parents=True, exist_ok=True)
+        log("Unpacking Ollama...")
+        try:
+            _untar_zst(arc, dest)
+        finally:
+            arc.unlink(missing_ok=True)
+        if not (dest / "bin" / "ollama").is_file():
+            raise LlmError("Ollama was downloaded but bin/ollama is missing from it.")
+        (dest / "bin" / "ollama").chmod(0o755)
+        log(f"Ollama installed in {dest}")
+    else:
+        log(f"Using Ollama at {ollama_bin()}")
+    if not start_server():
+        raise LlmError(f"Ollama did not start. Its log is in {AI_DIR / 'server.log'}")
+    log(f"Downloading the model {model} (one time; it stays on this computer)...")
+    body = json.dumps({"model": model, "stream": True}).encode()
+    req = urllib.request.Request(DEFAULT_URL + "/api/pull", body, {"Content-Type": "application/json"})
+    shown = -1
+    with _open(req, 3600) as r:
+        for raw in r:
+            check()
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if "error" in obj:
+                raise LlmError("Model download failed: " + str(obj["error"]))
+            tot, done = obj.get("total"), obj.get("completed")
+            if tot and done is not None:
+                pct = int(done * 100 / tot)
+                if pct // 5 != shown:
+                    shown = pct // 5
+                    log(f"Model: {pct}% of {tot / 1e9:.1f} GB")
+            elif obj.get("status") and obj.get("status") != "pulling manifest":
+                log("Model: " + obj["status"])
+    log(f"AI ready: {model}. Explain and Malware check will use it.")
+    return model
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args and args[0] == "--install":
+        m = next((a.split("=", 1)[1] for a in args if a.startswith("--model=")), None)
+        try:
+            install_ai(lambda t: print("[decompiler-studio] " + t, flush=True), m)
+        except Exception as e:
+            print(f"[decompiler-studio] AI model not installed: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            stop_server()

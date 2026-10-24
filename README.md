@@ -29,6 +29,7 @@ Then run `decompiler-studio` (or find it in your app menu).
 
 - Needs `python3` (3.9+ with `venv`), `git` and `curl`. No root, nothing system-wide.
 - Downloads jadx, a Java 25 runtime and Ghidra from their official GitHub releases (about 600 MB) into `~/.local/share/decompiler-studio`.
+- Also installs the AI for Explain / Malware check: a private copy of [Ollama](https://ollama.com) (1.5 GB) and **Qwen2.5-Coder**, 14B (about 9 GB) on a 12 GB+ graphics card, otherwise 7B (about 4.7 GB). Skip it with `bash -s -- --no-ai`, or choose with `bash -s -- --model=qwen2.5-coder:7b`. You can add it later from the app (Explain > Install AI model).
 - Run the same command again to update. Remove it with:
 
 ```bash
@@ -69,7 +70,7 @@ Java from a JAR/APK, with the progress log open:
 - **Code navigation.** **Ctrl+G** lists every function (all 27,000 of a split decompile) with a filter; double-click or Ctrl+click a function name like `FUN_006a508c` (or press **F12**) to jump to it, **Alt+Left** to go back.
 - **Code without symbols.** Libraries with no function names (Flutter's `libapp.so`, stripped `.so` files) are searched for function starts, so Ghidra still has code to decompile; huge results are split into `decompiled/part_NNN.c`.
 - **Unity + Flutter.** Their real code is compiled native code, so the app reads the names and strings that survive in it (names only, no method bodies).
-- **Explain.** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
+- **Explain.** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. It runs only on your computer: the installer sets up Ollama + Qwen2.5-Coder, and the app starts it when needed (or use Explain > Install AI model). An Ollama you already run, or any OpenAI-style local server (Explain > Server address), works too. Small models can be wrong; treat it as a hint.
 - **Split APKs.** If `split_config.*.apk` files (or an `.xapk`/`.apkm`/`.apks`) sit next to `base.apk`, they are merged automatically so native code and assets are included.
 - **Hunt** through every recovered file at once (text inside binary files too), drag and drop anywhere, big files open without freezing.
 - Never runs the program you open. It only reads it.
@@ -87,7 +88,7 @@ pip install pyinstaller -r requirements.txt   # and put jadx, jre, ghidra under 
 python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
   --add-data "backends/jadx:backends/jadx" --add-data "backends/jre:backends/jre" --add-data "backends/ghidra:backends/ghidra" \
   --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp \
-  --hidden-import llm --hidden-import helper_blob --hidden-import unity_assets --hidden-import viewers --collect-all UnityPy --collect-all fmod_toolkit --collect-all texture2ddecoder --collect-all etcpak --collect-all astc_encoder --collect-all tpk_ar --collect-all archspec --collect-submodules decompyle3 --collect-submodules uncompyle6 \
+  --hidden-import llm --hidden-import helper_blob --hidden-import unity_assets --hidden-import viewers --hidden-import zstandard --collect-all UnityPy --collect-all fmod_toolkit --collect-all texture2ddecoder --collect-all etcpak --collect-all astc_encoder --collect-all tpk_ar --collect-all archspec --collect-submodules decompyle3 --collect-submodules uncompyle6 \
   --collect-all xdis --collect-all dnfile app.py
 ```
 

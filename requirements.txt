@@ -7,3 +7,4 @@ dnfile
 decompyle3
 uncompyle6
 UnityPy
+zstandard
