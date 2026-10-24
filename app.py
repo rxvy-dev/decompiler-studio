@@ -44,6 +44,17 @@ def main():
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
         return cli(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "--install-ai":
+        # app --install-ai [--model=qwen2.5-coder:7b]: Ollama + model for Explain / Malware check
+        m = next((a.split("=", 1)[1] for a in sys.argv[2:] if a.startswith("--model=")), None)
+        try:
+            llm.install_ai(print, m)
+            return 0
+        except Exception as e:
+            print(f"AI model not installed: {e}")
+            return 1
+        finally:
+            llm.stop_server()
     if len(sys.argv) == 4 and sys.argv[1] in ("--extract-assets", "--decompile-binary"):
         # one file from an already recovered tree: app --extract-assets <file> <tree folder>
         if sys.argv[1] == "--extract-assets":
