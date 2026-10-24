@@ -338,6 +338,16 @@ def main():
             rv.setSpacing(0)
             rv.addWidget(self.pathlabel)
             self.pathlabel.hide()
+            self.binbar = QWidget()
+            bb = QHBoxLayout(self.binbar)
+            bb.setContentsMargins(10, 8, 10, 8)
+            self.binlabel = QLabel("This is a native binary. Turn it into C code:")
+            self.btn_decomp = QPushButton("Decompile this binary", objectName="primary", clicked=self.decompile_current,
+                                          toolTip="Run Ghidra on this file (Ctrl+D)")
+            bb.addWidget(self.binlabel, 1)
+            bb.addWidget(self.btn_decomp)
+            rv.addWidget(self.binbar)
+            self.binbar.hide()
             self.oracle = QWidget(objectName="oracle")
             ov = QVBoxLayout(self.oracle)
             ov.setContentsMargins(8, 4, 8, 6)
@@ -491,6 +501,11 @@ def main():
             p = self._selected_binary(idx)
             if p:
                 self.decompile_binary(p)
+
+        def decompile_current(self):
+            cur = getattr(self, "cur_file", None)
+            if cur and os.path.isfile(cur[0]) and engines.native_magic(cur[0]):
+                self.decompile_binary(cur[0])
 
         def decompile_selected(self):
             p = self._selected_binary()
@@ -684,6 +699,7 @@ def main():
             """A search hit inside a binary: say where it is, show the readable text around it and a hex dump."""
             self.cur_file = (p, None)
             self.pathlabel.show()
+            self.binbar.setVisible(bool(engines.native_magic(p)))
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
             self.pathlabel.setText(f"{rel}  @ 0x{off:x}")
             self.stack.setCurrentWidget(self.viewer)
@@ -729,6 +745,7 @@ def main():
                 self.show_binary_hit(p, line[1], line[2])
                 return
             self.cur_file = (p, line)
+            self.binbar.hide()
             self.pathlabel.show()
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
             try:
@@ -741,11 +758,12 @@ def main():
                 return
             if b"\x00" in head:
                 self.pathlabel.setText(rel)
+                self.binbar.setVisible(bool(engines.native_magic(p)))
                 self.stack.setCurrentWidget(self.viewer)
                 msg = f"[binary file, {size:,} bytes]"
                 if engines.native_magic(p):
-                    msg += ("\n\nThis is a native program/library. To turn it into C code, double-click it in the file tree,\n"
-                            "or right-click it > Decompile this binary (Ctrl+D). Ghidra does the work; big files take a while.\n"
+                    msg += ("\n\nThis is a native program/library. Press the 'Decompile this binary' button above (or double-click it in the\n"
+                            "file tree, or Ctrl+D). Ghidra does the work; big files take a while.\n"
                             "The result goes into the 'native' folder.")
                 self.viewer.setPlainText(msg)
                 return
