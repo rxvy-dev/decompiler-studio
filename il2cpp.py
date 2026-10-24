@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Read the names out of a Unity IL2CPP `global-metadata.dat`.
 
 A Unity game built with IL2CPP has no Java for its game logic: the C# was translated to C++ and

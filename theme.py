@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Look and feel for Decompiler Studio: a clean dark UI (Midnight is the default) with a few other
 themes selectable from the Theme menu; apply(name) switches them at run time.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Decompiler back-ends for Decompiler Studio.
 
 Each engine takes (input_path, out_dir, log) and writes recovered source /

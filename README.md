@@ -81,6 +81,12 @@ python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
   --collect-all xdis --collect-all dnfile app.py
 ```
 
+## License
+
+Decompiler Studio is free software, released under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)). You may use, study, share and change it; if you distribute a modified version, it must stay under the GPL with its source available. There is no warranty.
+
+Bundled/downloaded tools keep their own licenses: Ghidra and jadx (Apache-2.0), Temurin JRE (GPLv2 + Classpath Exception), PySide6 (LGPL-3.0), decompyle3 / uncompyle6 (GPL).
+
 ## Credits
 
 [Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Post-processing that makes Ghidra's C read more like hand-written C.
 
 Everything here is a textual, per-function rewrite of decompiled.c. Each rule only fires when it

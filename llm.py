@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Decompiler Studio - Copyright (C) 2026 rxvy-dev. Free software under the GNU GPL v3 or later; see LICENSE.
 """Explain: explains a piece of decompiled code in plain English with a small LOCAL language model.
 
 No model is bundled (they are 1 GB and up). It talks to a model server running on the same computer:
