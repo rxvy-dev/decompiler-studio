@@ -680,7 +680,54 @@ def main():
                 pass
             self.statusBar().showMessage(f"Theme: {name}")
 
+        def show_binary_hit(self, p, off, n):
+            """A search hit inside a binary: say where it is, show the readable text around it and a hex dump."""
+            self.cur_file = (p, None)
+            self.pathlabel.show()
+            rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
+            self.pathlabel.setText(f"{rel}  @ 0x{off:x}")
+            self.stack.setCurrentWidget(self.viewer)
+            with open(p, "rb") as f:
+                size = os.path.getsize(p)
+                f.seek(max(0, off - 400))
+                base = max(0, off - 400)
+                data = f.read(900)
+            where = ""
+            try:
+                from elftools.elf.elffile import ELFFile
+                with open(p, "rb") as f:
+                    for sec in ELFFile(f).iter_sections():
+                        a, sz = sec["sh_offset"], sec["sh_size"]
+                        if sec["sh_type"] != "SHT_NOBITS" and a <= off < a + sz:
+                            where = f"  in section {sec.name}"
+                            break
+            except Exception:
+                pass
+            def readable(b):
+                out = []
+                for i in range(0, len(b)):
+                    c = b[i]
+                    out.append(chr(c) if 32 <= c < 127 else ("\n" if c in (10, 13) else "\0"))
+                text = "".join(out)
+                return [t.strip() for t in text.replace("\0", "\n").split("\n") if len(t.strip()) >= 3]
+            lines = [f"Match at byte offset 0x{off:x} ({off:,}) of {size:,}{where}", "",
+                     "Text stored around it (compiled code has no source lines; this is the data next to the match):", ""]
+            lines += ["    " + t for t in readable(data)] or ["    (nothing readable)"]
+            lines += ["", "Hex dump (the match starts at the marked offset):", ""]
+            for i in range(0, len(data), 16):
+                row = data[i:i + 16]
+                hx = " ".join(f"{b:02x}" for b in row).ljust(47)
+                asc = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+                mark = ">" if base + i <= off < base + i + 16 else " "
+                lines.append(f"{mark}{base + i:08x}  {hx}  {asc}")
+            lines += ["", "To read this as code: double-click the file in the tree (Ctrl+D) to decompile it with Ghidra.",
+                      "For Flutter apps the same text is also listed in maincode/flutter/strings.txt."]
+            self.viewer.setPlainText("\n".join(lines))
+
         def show_file(self, p, line=None):
+            if isinstance(line, tuple) and line and line[0] == "bin":
+                self.show_binary_hit(p, line[1], line[2])
+                return
             self.cur_file = (p, line)
             self.pathlabel.show()
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
@@ -780,7 +827,7 @@ def main():
                     # not text (a library, dex, resources.arsc ...): look for the words inside the bytes
                     for off, ctx in self._binary_hits(f, ql):
                         it = QListWidgetItem(f"{f.relative_to(self.out_dir)} @0x{off:x} (binary)  {ctx}")
-                        it.setData(Qt.UserRole, (str(f), 0))
+                        it.setData(Qt.UserRole, (str(f), ("bin", off, len(q))))
                         self.results.addItem(it)
                         count += 1
                         if count >= 500:
