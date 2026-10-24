@@ -20,12 +20,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
+import ghidra.app.cmd.disassemble.DisassembleCommand;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
@@ -56,7 +59,7 @@ import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TimeoutTaskMonitor;
 
 public class DsGhidra implements GhidraLaunchable {
-    static final String HELPER_VERSION = "5";
+    static final String HELPER_VERSION = "6";
 
 
     static final int PER_FUNCTION_SECONDS = 30;
@@ -169,6 +172,12 @@ public class DsGhidra implements GhidraLaunchable {
             say("Imported as " + prog.getLanguageID() + " / " + prog.getCompilerSpec().getCompilerSpecID()
                 + ", " + prog.getFunctionManager().getFunctionCount() + " function(s) known before analysis");
 
+            try {
+                discoverFunctions(prog, Math.max(60, analysisSecs / 2));
+            }
+            catch (Throwable t) {
+                say("Function search skipped: " + t);
+            }
             if (analyze) {
                 analyse(prog, analysisSecs);
             }
@@ -182,6 +191,148 @@ public class DsGhidra implements GhidraLaunchable {
                 prog.release(consumer);
             }
         }
+    }
+
+    /**
+     * Programs without symbols for their code (Flutter's libapp.so, stripped/packed libraries) give
+     * Ghidra no place to start, so it finds no functions at all. Find function starts in the machine
+     * code itself: AArch64 frame set-ups (stp x29, x30, [sp or x15, #-N]!, paciasp, bti c) and the
+     * targets of every bl call; x86 push rbp / mov rbp, rsp and endbr64.
+     */
+    static int discoverFunctions(Program prog, long secs) throws Exception {
+        Memory mem = prog.getMemory();
+        String proc = prog.getLanguage().getProcessor().toString();
+        boolean a64 = proc.equalsIgnoreCase("AARCH64");
+        boolean x86 = proc.equalsIgnoreCase("x86");
+        if (!a64 && !x86) {
+            return 0;
+        }
+        long codeBytes = 0;
+        List<MemoryBlock> code = new ArrayList<>();
+        for (MemoryBlock b : mem.getBlocks()) {
+            if (b.isExecute() && b.isInitialized() && b.getSize() < Integer.MAX_VALUE
+                    && !BOILERPLATE_BLOCKS.contains(b.getName())) {
+                code.add(b);
+                codeBytes += b.getSize();
+            }
+        }
+        int have = 0;
+        for (Function f : prog.getFunctionManager().getFunctions(true)) {
+            MemoryBlock b = mem.getBlock(f.getEntryPoint());
+            if (!f.isExternal() && b != null && code.contains(b)) {
+                have++;
+            }
+        }
+        // a normal program has a function every few hundred bytes; one per 16 KB means symbols are missing
+        if (codeBytes < 32 * 1024 || (long) have * 16384 >= codeBytes) {
+            return 0;
+        }
+        say("Only " + have + " function(s) known for " + (codeBytes / 1024) + " KB of code (no symbols): "
+            + "searching the machine code for function starts...");
+        AddressSet starts = new AddressSet();
+        for (MemoryBlock b : code) {
+            byte[] buf = new byte[(int) b.getSize()];
+            int n = b.getBytes(b.getStart(), buf);
+            Address base = b.getStart();
+            if (a64) {
+                long off0 = (4 - (base.getOffset() & 3)) & 3;
+                for (int i = (int) off0; i + 4 <= n; i += 4) {
+                    int w = (buf[i] & 0xff) | (buf[i + 1] & 0xff) << 8 | (buf[i + 2] & 0xff) << 16 | (buf[i + 3] & 0xff) << 24;
+                    if ((w & 0xFFC07C1F) == 0xA980781D) {              // stp x29, x30, [xN, #-imm]!
+                        int at = i;
+                        if (i >= 4) {
+                            int p = (buf[i - 4] & 0xff) | (buf[i - 3] & 0xff) << 8 | (buf[i - 2] & 0xff) << 16 | (buf[i - 1] & 0xff) << 24;
+                            if (p == 0xD503233F || p == 0xD503245F || p == 0xD503249F || p == 0xD50324DF) {
+                                at = i - 4;                             // paciasp / bti c|j|jc in front
+                            }
+                        }
+                        starts.add(base.add(at));
+                    }
+                    else if ((w & 0xFC000000) == 0x94000000) {          // bl <target>
+                        long imm = w & 0x03FFFFFF;
+                        if ((imm & 0x02000000) != 0) {
+                            imm -= 0x04000000;
+                        }
+                        long t = i + imm * 4;
+                        if (t >= 0 && t + 4 <= n) {
+                            int tw = (buf[(int) t] & 0xff) | (buf[(int) t + 1] & 0xff) << 8;
+                            if (tw != 0 || buf[(int) t + 2] != 0 || buf[(int) t + 3] != 0) {
+                                starts.add(base.add(t));
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                for (int i = 0; i + 4 <= n; i++) {
+                    int b0 = buf[i] & 0xff, b1 = buf[i + 1] & 0xff, b2 = buf[i + 2] & 0xff, b3 = buf[i + 3] & 0xff;
+                    if (b0 == 0xF3 && b1 == 0x0F && b2 == 0x1E && (b3 == 0xFA || b3 == 0xFB)) {
+                        starts.add(base.add(i));                        // endbr64 / endbr32
+                        i += 3;
+                    }
+                    else if (b0 == 0x55 && ((b1 == 0x48 && b2 == 0x89 && b3 == 0xE5) || (b1 == 0x89 && b2 == 0xE5))) {
+                        if (i == 0 || !(buf[i - 1] == (byte) 0xFA && i >= 4 && (buf[i - 4] & 0xff) == 0xF3)) {
+                            starts.add(base.add(i));                    // push rbp; mov rbp, rsp
+                        }
+                    }
+                }
+            }
+        }
+        // drop addresses that already belong to a known function
+        AddressSet fresh = new AddressSet();
+        for (Address a : starts.getAddresses(true)) {
+            if (prog.getFunctionManager().getFunctionContaining(a) == null) {
+                fresh.add(a);
+            }
+        }
+        long count = fresh.getNumAddresses();
+        if (count == 0) {
+            say("No function starts found in the code.");
+            return 0;
+        }
+        say("Found " + count + " likely function start(s); building functions from them...");
+        TimeoutTaskMonitor mon = TimeoutTaskMonitor.timeoutIn(secs, TimeUnit.SECONDS);
+        AtomicInteger made = new AtomicInteger();
+        Thread tk = ticker("Building functions", () -> made.get() + "/" + count);
+        int tx = prog.startTransaction("Decompiler Studio function search");
+        try {
+            Listing listing = prog.getListing();
+            // a symbol like _kDartSnapshotText makes Ghidra define the whole code section as one data
+            // object, which blocks disassembly: clear data (not instructions) from the code blocks
+            for (MemoryBlock b : code) {
+                Data d = listing.getDefinedDataContaining(b.getStart());
+                boolean anyCode = listing.getInstructions(new AddressSet(b.getStart(), b.getEnd()), true).hasNext();
+                if (!anyCode) {
+                    listing.clearCodeUnits(b.getStart(), b.getEnd(), false);
+                }
+                else if (d != null) {
+                    listing.clearCodeUnits(d.getMinAddress(), d.getMaxAddress(), false);
+                }
+            }
+            DisassembleCommand dis = new DisassembleCommand(fresh, null, true);
+            dis.applyTo(prog, mon);
+            for (Address a : fresh.getAddresses(true)) {
+                if (mon.isCancelled()) {
+                    break;
+                }
+                if (listing.getInstructionAt(a) == null || prog.getFunctionManager().getFunctionAt(a) != null) {
+                    continue;
+                }
+                CreateFunctionCmd cf = new CreateFunctionCmd(a);
+                if (cf.applyTo(prog, TaskMonitor.DUMMY)) {
+                    made.incrementAndGet();
+                }
+            }
+        }
+        finally {
+            prog.endTransaction(tx, true);
+            tk.interrupt();
+        }
+        if (mon.didTimeout()) {
+            say("Function search hit its " + secs + " s limit; keeping the " + made.get() + " it built.");
+        }
+        say("Built " + made.get() + " function(s) from the machine code (their names are lost: FUN_<address>).");
+        return made.get();
     }
 
     static void analyse(Program prog, long secs) {

@@ -1107,7 +1107,8 @@ def decompile_embedded(path, root, log):
     if kind is None:
         raise RuntimeError("This file is not a native binary (ELF or PE).")
     out = embedded_out_dir(path, root)
-    if (out / "decompiled.c").exists():
+    done = out / "decompiled.c"
+    if done.exists() and "// ---- " in done.read_text(encoding="utf-8", errors="replace").split("// ---- functions ----", 1)[-1]:
         log(f"Already decompiled: {out}")
         return out
     if out.exists():
@@ -1125,8 +1126,78 @@ def decompile_embedded(path, root, log):
     if size > 6_000_000:
         log("This is a big file: Ghidra may take 10-25 minutes. Press Cancel to stop; anything finished is kept.")
     decompile_native(path, out, log, kind)
+    c = out / "decompiled.c"
+    if c.exists():
+        try:
+            if name == "libapp.so":
+                _dart_names(c, log)
+            _split_big_c(c, log)
+        except Exception as e:
+            log(f"(post-processing skipped: {e})")
     log(f"Done: {out}")
     return out
+
+
+# Dart's AOT compiler keeps a few things in fixed ARM64 registers. Ghidra sees them as "unaffected"
+# inputs (unaff_x27 ...); naming them makes the C much easier to follow.
+DART_REGS = {"x15": "DART_SP", "x22": "NULL_OBJ", "x26": "THR", "x27": "PP", "x28": "HEAP_BITS", "x21": "WRITE_BARRIER_MASK"}
+DART_NOTE = """// Flutter / Dart AOT code. Register names used below:
+//   PP        = x27, the object pool: constants, strings and called functions are loaded from PP + offset
+//   THR       = x26, the current Dart thread (stack limit, runtime entry points)
+//   DART_SP   = x15, Dart's own stack pointer
+//   NULL_OBJ  = x22, Dart's null
+//   HEAP_BITS = x28, used by the garbage collector's write barrier
+// Function names are not stored in libapp.so, so every function is FUN_<address>.
+// Text shown on screen is in maincode/flutter/strings.txt.
+"""
+
+
+def _dart_names(c, log):
+    text = c.read_text(encoding="utf-8", errors="replace")
+    for reg, nm in DART_REGS.items():
+        text = re.sub(rf"\bunaff_{reg}\b", nm, text)
+        text = re.sub(rf"\bin_{reg}\b", nm, text)
+    head, sep, rest = text.partition("#include")
+    text = head + DART_NOTE + "\n" + sep + rest if sep else DART_NOTE + "\n" + text
+    c.write_text(text, encoding="utf-8")
+    log("Named Dart's fixed registers (PP = object pool, THR = thread, ...); see the note at the top of the C file.")
+
+
+def _split_big_c(c, log, limit=3_000_000):
+    """A decompiled.c of tens of MB is too much for one view: split it into decompiled/part_NNN.c
+    (cut between functions) and turn decompiled.c into an index of the parts."""
+    if c.stat().st_size <= limit:
+        return
+    text = c.read_text(encoding="utf-8", errors="replace")
+    head, sep, body = text.partition("// ---- functions ----")
+    if not sep:
+        return
+    header = head.split("// ---- function prototypes ----")[0].rstrip() + "\n"
+    chunks = re.split(r"(?m)^(?=// ---- .* @ [0-9a-fA-F]+ ----$)", body)
+    pdir = c.parent / "decompiled"
+    pdir.mkdir(exist_ok=True)
+    parts, cur, size = [], [], 0
+    for ch in chunks:
+        if not ch.strip():
+            continue
+        cur.append(ch)
+        size += len(ch)
+        if size >= limit:
+            parts.append(cur)
+            cur, size = [], 0
+    if cur:
+        parts.append(cur)
+    index = [header.replace('#include "types.h"', ""), f"// This program decompiled to {len(text) / 1e6:.0f} MB of C, split into {len(parts)} files",
+             "// in the 'decompiled' folder next to this one (each file covers the addresses listed).", ""]
+    for i, pc in enumerate(parts, 1):
+        names = [m.group(1) for m in (re.match(r"// ---- (.*) @ ([0-9a-fA-F]+) ----", x) for x in pc) if m]
+        addrs = [m.group(2) for m in (re.match(r"// ---- (.*) @ ([0-9a-fA-F]+) ----", x) for x in pc) if m]
+        fn = f"part_{i:03d}.c"
+        (pdir / fn).write_text(header.replace('#include "types.h"', '#include "../types.h"') + "\n" + "".join(pc), encoding="utf-8")
+        if addrs:
+            index.append(f"// decompiled/{fn}: {len(names)} functions, {addrs[0]} - {addrs[-1]}")
+    c.write_text("\n".join(index) + "\n", encoding="utf-8")
+    log(f"The C is {len(text) / 1e6:.0f} MB, so it was split into {len(parts)} files in decompiled/ (decompiled.c lists them).")
 
 
 def _write_funcs(out, code_bytes, base, funcs, md, log, label):
