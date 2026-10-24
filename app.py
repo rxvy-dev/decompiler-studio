@@ -48,7 +48,7 @@ def main():
                                    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
                                    QSplitter, QTextBrowser, QTreeView, QVBoxLayout, QWidget, QStackedWidget,
                                    QListWidget, QListWidgetItem, QTabWidget, QPushButton,
-                                   QFileIconProvider, QGraphicsDropShadowEffect)
+                                   QFileIconProvider, QGraphicsDropShadowEffect, QFrame)
     from pygments import highlight
     from pygments.formatters import HtmlFormatter
     from pygments.lexers import get_lexer_for_filename, TextLexer, guess_lexer_for_filename
@@ -72,7 +72,7 @@ def main():
             except Exception as e:
                 self.failed.emit(str(e))
 
-    DripBar, SigilCanvas = theme.make_widgets()
+    HeaderBar, WelcomeCanvas = theme.make_widgets()
     UI = {"title_font": None}
 
     class IconProvider(QFileIconProvider):
@@ -132,7 +132,7 @@ def main():
 
             bar = self.menuBar()
             m = bar.addMenu("&File")
-            a = QAction("&Summon file...", self, shortcut=QKeySequence.Open, triggered=self.open_dialog)
+            a = QAction("&Open file...", self, shortcut=QKeySequence.Open, triggered=self.open_dialog)
             m.addAction(a)
             a = QAction("&Extract source to folder...", self, triggered=self.export)
             m.addAction(a)
@@ -149,20 +149,20 @@ def main():
             self.theme_group = QActionGroup(self)
             self.theme_group.setExclusive(True)
             for tname in theme.THEME_NAMES:
-                label = tname + ("  (main)" if tname == theme.DEFAULT_THEME else "")
+                label = tname + ("  (default)" if tname == theme.DEFAULT_THEME else "")
                 ta = QAction(label, self, checkable=True, checked=(tname == theme.CURRENT))
                 ta.triggered.connect(lambda _=False, n=tname: self.set_theme(n))
                 self.theme_group.addAction(ta)
                 tm.addAction(ta)
 
             # ---- header bar
-            header = DripBar(objectName="header")
+            header = HeaderBar(objectName="header")
             hl = QHBoxLayout(header)
-            hl.setContentsMargins(14, 6, 10, 6 + DripBar.DRIP_ROOM)
+            hl.setContentsMargins(14, 8, 10, 10)
             logo = QLabel("Decompiler Studio", objectName="logo")
             logo.setFont(title_font(30))
             glow = QGraphicsDropShadowEffect(logo)
-            glow.setColor(QColor(*theme.GLOW, 190))
+            glow.setColor(QColor(*theme.GLOW, 120))
             self.logo_glow = glow
             glow.setBlurRadius(22)
             glow.setOffset(0, 0)
@@ -171,7 +171,7 @@ def main():
             hl.addWidget(logo)
             hl.addSpacing(18)
             hl.addWidget(self.filelabel, 1)
-            self.btn_open = QPushButton("Summon", objectName="primary", clicked=self.open_dialog,
+            self.btn_open = QPushButton("Open", objectName="primary", clicked=self.open_dialog,
                                         toolTip="Open a file to decompile (Ctrl+O)")
             self.btn_export = QPushButton("Extract", clicked=self.export, enabled=False,
                                           toolTip="Export the recovered source to a folder")
@@ -182,7 +182,7 @@ def main():
             self.btn_explain = QPushButton("Explain", clicked=self.explain,
                                            toolTip="Explain the selected code (or the function you are looking at) in plain "
                                                    "English with a small local AI model (Ctrl+E)")
-            self.btn_cancel = QPushButton("Banish", clicked=self.cancel,
+            self.btn_cancel = QPushButton("Cancel", clicked=self.cancel,
                                           toolTip="Cancel: stop the decompile and every helper it started")
             self.btn_cancel.hide()
             for b in (self.btn_cancel, self.btn_report, self.btn_export, self.btn_explain, self.btn_log, self.btn_open):
@@ -202,11 +202,11 @@ def main():
             from PySide6.QtCore import QSize
             self.tree.setIconSize(QSize(18, 18))
             self.tree.hide()
-            self.treehint = QLabel("Nothing devoured yet.\nRecovered folders and files\nwill rise here.",
+            self.treehint = QLabel("Nothing opened yet.\nRecovered folders and files\nwill appear here.",
                                    objectName="hint", alignment=Qt.AlignTop | Qt.AlignLeft)
             self.tree.clicked.connect(self.on_pick)
 
-            self.search = QLineEdit(placeholderText="Hunt through every recovered file (Enter)...")
+            self.search = QLineEdit(placeholderText="Search every recovered file (Enter)...")
             self.search.returnPressed.connect(self.do_search)
             self.results = QListWidget()
             self.results.itemActivated.connect(self.on_result)
@@ -216,7 +216,7 @@ def main():
             left = QWidget()
             lv = QVBoxLayout(left)
             lv.setContentsMargins(8, 4, 4, 8)
-            lv.addWidget(QLabel("The remains", objectName="panelTitle"))
+            lv.addWidget(QLabel("Files", objectName="panelTitle"))
             lv.addWidget(self.search)
             lv.addWidget(self.tree, 3)
             lv.addWidget(self.treehint, 3)
@@ -231,32 +231,73 @@ def main():
             self.bigviewer.setFont(theme.mono_font(10))
             self.bigviewer.setLineWrapMode(QPlainTextEdit.NoWrap)
             # welcome screen shown before anything is opened
-            self.welcome = SigilCanvas()
+            self.welcome = WelcomeCanvas()
             wl = QVBoxLayout(self.welcome)
             wl.addStretch(2)
             big = QLabel("Decompiler Studio", objectName="biglogo", alignment=Qt.AlignCenter)
             big.setFont(title_font(72))
             bigglow = QGraphicsDropShadowEffect(big)
-            bigglow.setColor(QColor(*theme.BIGGLOW, 230))
+            bigglow.setColor(QColor(*theme.BIGGLOW, 150))
             self.big_glow = bigglow
             bigglow.setOffset(0, 0)
-            bigglow.setBlurRadius(40)
+            bigglow.setBlurRadius(28)
             big.setGraphicsEffect(bigglow)
             self.welcome.glow_effect = bigglow
             wl.addWidget(big)
-            sub = QLabel("Feed it an APK, JAR, EXE, ELF, DLL, .pyc or .asar. Drop it anywhere on this window.",
+            sub = QLabel("Open an APK, JAR, EXE, ELF, DLL, .pyc or .asar, or drop it anywhere on this window.",
                          objectName="subtitle", alignment=Qt.AlignCenter)
             wl.addWidget(sub)
             wl.addSpacing(22)
-            row = QHBoxLayout()
-            row.addStretch(1)
-            ob = QPushButton("Summon a file", objectName="primary", clicked=self.open_dialog)
+            # drop zone: dashed box with the open button
+            zone = QFrame(objectName="dropzone")
+            zone.setFixedWidth(560)
+            zl = QVBoxLayout(zone)
+            zl.setContentsMargins(24, 22, 24, 22)
+            zl.setSpacing(6)
+            zi = QLabel("\u2193", objectName="dropicon", alignment=Qt.AlignCenter)
+            zt = QLabel("Drop a file anywhere in this window", objectName="droptext", alignment=Qt.AlignCenter)
+            zs = QLabel("or", objectName="dropsub", alignment=Qt.AlignCenter)
+            ob = QPushButton("Open a file", objectName="primary", clicked=self.open_dialog)
             ob.setCursor(Qt.PointingHandCursor)
-            ob.setMinimumWidth(160)
-            row.addWidget(ob)
-            row.addStretch(1)
-            wl.addLayout(row)
+            ob.setMinimumWidth(190)
+            ob.setMinimumHeight(38)
+            for wdg in (zi, zt, zs):
+                zl.addWidget(wdg)
+            orow = QHBoxLayout()
+            orow.addStretch(1)
+            orow.addWidget(ob)
+            orow.addStretch(1)
+            zl.addLayout(orow)
+            zrow = QHBoxLayout()
+            zrow.addStretch(1)
+            zrow.addWidget(zone)
+            zrow.addStretch(1)
+            wl.addLayout(zrow)
+            wl.addSpacing(16)
+            prow = QHBoxLayout()
+            prow.addStretch(1)
+            for ext in ("APK", "JAR", "EXE", "ELF", "DLL", "PYC", "ASAR"):
+                prow.addWidget(QLabel(ext, objectName="pill"))
+            prow.addStretch(1)
+            wl.addLayout(prow)
             wl.addSpacing(26)
+            frow = QHBoxLayout()
+            frow.addStretch(1)
+            for title, body in (("Native code \u2192 C", "Ghidra, tidied to read\nlike hand-written C"),
+                                ("Android \u2192 Java", "jadx, plus a maincode\nfolder for the app's own code"),
+                                ("Explain", "a small local AI model\nexplains code in plain English")):
+                card = QFrame(objectName="featcard")
+                cl2 = QVBoxLayout(card)
+                cl2.setContentsMargins(16, 12, 16, 12)
+                cl2.setSpacing(2)
+                cl2.addWidget(QLabel(title, objectName="feattitle"))
+                cl2.addWidget(QLabel(body, objectName="featbody"))
+                card.setFixedWidth(238)
+                frow.addWidget(card)
+            frow.addStretch(1)
+            frow.insertStretch(0, 1)
+            wl.addLayout(frow)
+            wl.addSpacing(22)
             warn = QLabel("WARNING: " + engines.NOTICE, objectName="warning", alignment=Qt.AlignCenter)
             wl.addWidget(warn)
             wl.addStretch(3)
@@ -276,7 +317,7 @@ def main():
             ov = QVBoxLayout(self.oracle)
             ov.setContentsMargins(8, 4, 8, 6)
             oh = QHBoxLayout()
-            self.oracle_title = QLabel("The Oracle", objectName="panelTitle")
+            self.oracle_title = QLabel("Explain", objectName="panelTitle")
             oh.addWidget(self.oracle_title, 1)
             self.btn_oracle_stop = QPushButton("Stop", clicked=self.explain_stop)
             self.btn_oracle_close = QPushButton("Close", clicked=self.oracle.hide)
@@ -325,7 +366,7 @@ def main():
             self.progress.hide()
             self.statusBar().addPermanentWidget(self.progress)
             self.statusBar().addPermanentWidget(QLabel(engines.NOTICE + "  ", objectName="warning"))
-            self.statusBar().showMessage("Waiting for something to dissect")
+            self.statusBar().showMessage("Open a file to begin")
 
         # -------- drag and drop
         def dragEnterEvent(self, e):
@@ -339,7 +380,7 @@ def main():
 
         # -------- actions
         def open_dialog(self):
-            p, _ = QFileDialog.getOpenFileName(self, "Summon a file to decompile")
+            p, _ = QFileDialog.getOpenFileName(self, "Open a file to decompile")
             if p:
                 self.load(p)
 
@@ -349,7 +390,7 @@ def main():
             out = os.path.join(self.work_root, Path(path).name + ".src")
             self.logbox.clear()
             self.logbox.appendPlainText(f"Opening {path}")
-            self.statusBar().showMessage("Devouring...")
+            self.statusBar().showMessage("Working...")
             self.progress.show()
             self.worker = Worker(path, out)
             self.worker.log.connect(self.logbox.appendPlainText)
@@ -357,7 +398,7 @@ def main():
             self.worker.failed.connect(self.fail)
             self.worker.start()
             self.setWindowTitle(f"Decompiler Studio - {Path(path).name}")
-            self.filelabel.setText(f"devouring  {Path(path).name} ...")
+            self.filelabel.setText(f"opening  {Path(path).name} ...")
             self.btn_log.setChecked(True)
             self.btn_open.setEnabled(False)
             self.btn_cancel.show()
@@ -365,7 +406,7 @@ def main():
 
         def cancel(self):
             self.btn_cancel.setEnabled(False)
-            self.statusBar().showMessage("Banishing...")
+            self.statusBar().showMessage("Cancelling...")
             engines.cancel_all()
 
         def done(self, kind, out):
@@ -380,7 +421,7 @@ def main():
             self.treehint.hide()
             self.tree.show()
             self.tree.setRootIndex(self.model.index(out))
-            self.statusBar().showMessage(f"{engines.KIND_LABEL.get(kind, kind)} devoured - source tree loaded (Report explains what was recovered)")
+            self.statusBar().showMessage(f"{engines.KIND_LABEL.get(kind, kind)} done - source tree loaded (Report explains what was recovered)")
             self.expand_first(out)
 
         def expand_first(self, out):
@@ -399,9 +440,9 @@ def main():
             self.btn_cancel.hide()
             if msg == "Cancelled.":
                 self.btn_open.setEnabled(True)
-                self.filelabel.setText("banished")
-                self.statusBar().showMessage("Banished")
-                self.logbox.appendPlainText("Cancelled by user (banished).")
+                self.filelabel.setText("cancelled")
+                self.statusBar().showMessage("Cancelled")
+                self.logbox.appendPlainText("Cancelled by user.")
                 return
             self.btn_open.setEnabled(True)
             self.filelabel.setText("the ritual failed - see log")
@@ -418,7 +459,7 @@ def main():
             if self.out_dir and (Path(self.out_dir) / "REPORT.md").exists():
                 self.show_file(str(Path(self.out_dir) / "REPORT.md"))
 
-        # -------- the Oracle (explain code with a small local model)
+        # -------- Explain (explain code with a small local model)
         def _llm_settings(self):
             from PySide6.QtCore import QSettings
             url, model = llm.settings()
@@ -439,7 +480,7 @@ def main():
 
         def explain_help(self):
             self.oracle.show()
-            self.oracle_title.setText("The Oracle: setup")
+            self.oracle_title.setText("Explain: setup")
             self.oracle_text.setPlainText(llm.HELP + "\n\nThe code you explain is sent only to the address in Server address "
                                           "(default: this computer).")
 
@@ -490,13 +531,13 @@ def main():
                 return
             url, model = self._llm_settings()
             self.oracle.show()
-            self.oracle_title.setText(f"The Oracle: {label}")
-            self.oracle_text.setPlainText("Listening..." + ("" if llm.is_local(url) else f"\n(the code is being sent to {url})"))
+            self.oracle_title.setText(f"Explain: {label}")
+            self.oracle_text.setPlainText("Thinking..." + ("" if llm.is_local(url) else f"\n(the code is being sent to {url})"))
             self._oracle_buf = ""
             self.btn_explain.setEnabled(False)
             self.btn_oracle_stop.setEnabled(True)
             self.explainer = ExplainWorker(code, fname, label, url, model)
-            self.explainer.model.connect(lambda m: self.oracle_title.setText(f"The Oracle: {label}  ({m})"))
+            self.explainer.model.connect(lambda m: self.oracle_title.setText(f"Explain: {label}  ({m})"))
             self.explainer.piece.connect(self._oracle_piece)
             self.explainer.finished_ok.connect(self._oracle_done)
             self.explainer.failed.connect(self._oracle_failed)
@@ -517,7 +558,7 @@ def main():
         def _oracle_failed(self, msg):
             self.btn_explain.setEnabled(True)
             self.btn_oracle_stop.setEnabled(False)
-            self.oracle_title.setText("The Oracle")
+            self.oracle_title.setText("Explain")
             self.oracle_text.setPlainText(msg)
 
         def explain_stop(self):
@@ -530,8 +571,8 @@ def main():
             app_ = QApplication.instance()
             app_.setStyleSheet(theme.QSS)
             app_.setWindowIcon(theme.app_icon())
-            self.logo_glow.setColor(QColor(*theme.GLOW, 190))
-            self.big_glow.setColor(QColor(*theme.BIGGLOW, 230))
+            self.logo_glow.setColor(QColor(*theme.GLOW, 120))
+            self.big_glow.setColor(QColor(*theme.BIGGLOW, 150))
             self.model.setIconProvider(IconProvider())      # folder icons are tinted per theme
             for act in self.theme_group.actions():
                 act.setChecked(act.text().split("  ")[0] == name)
@@ -678,7 +719,7 @@ def main():
         theme.apply(theme.DEFAULT_THEME)
     app.setStyleSheet(theme.QSS)
     app.setWindowIcon(theme.app_icon())
-    UI["title_font"] = theme.load_fonts(engines.app_dir())
+    
     w = Win()
     w.show()
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):

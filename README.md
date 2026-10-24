@@ -51,7 +51,7 @@ Java from a JAR/APK, with the progress log open:
 
 ### Themes
 
-**Evil** is the main one. Void, Toxic, Frost and Bone (light) are in the **Theme** menu, and your choice is remembered.
+**Midnight** is the default. Graphite, Forest, Violet and Daylight (light) are in the **Theme** menu, and your choice is remembered.
 
 ![Themes](docs/themes.jpg)
 
@@ -60,7 +60,7 @@ Java from a JAR/APK, with the progress log open:
 - **C that reads like C.** Casts hidden, decimal numbers, `x * 1.0` and stack-protector noise removed, variables declared where first used, `for (int i = 0; ...)` loops restored. Without debug info the names stay generic (`param_1`, `iVar3`): build your own programs with `-g -O0` to get your real names back.
 - **`maincode/` for APKs.** The app's own packages, picked out from thousands of library files.
 - **Unity + Flutter.** Their real code is compiled native code, so the app reads the names and strings that survive in it (names only, no method bodies).
-- **Explain (the Oracle).** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
+- **Explain.** Select some code and press **Ctrl+E**: a small *local* AI model explains it in plain English. Nothing is bundled and nothing leaves your computer. Setup: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:1.5b`. Any OpenAI-style local server works too (Explain menu > Server address). Small models can be wrong; treat it as a hint.
 - **Hunt** through every recovered file at once, drag and drop anywhere, big files open without freezing.
 - Never runs the program you open. It only reads it.
 
@@ -76,11 +76,11 @@ Java from a JAR/APK, with the progress log open:
 pip install pyinstaller -r requirements.txt   # and put jadx, jre, ghidra under backends/ (see .github/workflows/build.yml)
 python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
   --add-data "backends/jadx:backends/jadx" --add-data "backends/jre:backends/jre" --add-data "backends/ghidra:backends/ghidra" \
-  --add-data "assets:assets" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp \
+  --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp \
   --hidden-import llm --hidden-import helper_blob --collect-submodules decompyle3 --collect-submodules uncompyle6 \
   --collect-all xdis --collect-all dnfile app.py
 ```
 
 ## Credits
 
-[Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6, and the Metal Mania font (SIL Open Font License).
+[Ghidra](https://ghidra-sre.org) (NSA, Apache-2.0), [jadx](https://github.com/skylot/jadx) (Apache-2.0), Temurin JRE, decompyle3 / uncompyle6.

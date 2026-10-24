@@ -63,7 +63,7 @@ jobs:
         run: |
           SEP=":"; [ "${{ runner.os }}" = "Windows" ] && SEP=";"
           python -m PyInstaller --noconfirm --onedir --windowed --name decompiler-studio \
-            --add-data "backends/jadx${SEP}backends/jadx" --add-data "backends/jre${SEP}backends/jre" --add-data "assets${SEP}assets" --add-data "backends/ghidra${SEP}backends/ghidra" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp --hidden-import llm --hidden-import helper_blob \
+            --add-data "backends/jadx${SEP}backends/jadx" --add-data "backends/jre${SEP}backends/jre" --add-data "backends/ghidra${SEP}backends/ghidra" --hidden-import theme --hidden-import unpackers --hidden-import tidy --hidden-import il2cpp --hidden-import llm --hidden-import helper_blob \
             --collect-submodules decompyle3 --collect-submodules uncompyle6 \
             --collect-all xdis --collect-all dnfile app.py
       - uses: actions/upload-artifact@v4
