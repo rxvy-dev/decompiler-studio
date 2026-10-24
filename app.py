@@ -11,6 +11,7 @@ from pathlib import Path
 import engines
 import llm
 import theme
+import viewers
 
 HELP = """Decompiler Studio
 Usage:
@@ -190,6 +191,12 @@ def main():
             a = QAction("&Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
             m.addAction(a)
 
+            nm = bar.addMenu("&Go")
+            nm.addAction(QAction("Go to &function / offset...", self, shortcut="Ctrl+G", triggered=self.goto_dialog))
+            nm.addAction(QAction("Go to &definition of the word under the cursor", self, shortcut="F12", triggered=self.goto_definition))
+            nm.addAction(QAction("&Back", self, shortcut="Alt+Left", triggered=self.go_back))
+            nm.addSeparator()
+            nm.addAction(QAction("File &info (hashes, entropy)", self, shortcut="Ctrl+I", triggered=self.file_info))
             em = bar.addMenu("&Explain")
             em.addAction(QAction("&Explain selection / function", self, shortcut="Ctrl+E", triggered=self.explain))
             em.addAction(QAction("Choose &model...", self, triggered=self.pick_model))
@@ -363,6 +370,16 @@ def main():
             self.stack.addWidget(self.bigviewer)
             self.working = WorkCanvas()
             self.stack.addWidget(self.working)
+            ImageView, AudioView, ModelView, FontView, HexView = viewers.make_viewers(theme)
+            self.imgview, self.audview, self.modview = ImageView(), AudioView(), ModelView()
+            self.fontview, self.hexview = FontView(), HexView()
+            self.media = {"image": self.imgview, "audio": self.audview, "model": self.modview, "font": self.fontview}
+            for v in (self.imgview, self.audview, self.modview, self.fontview, self.hexview):
+                self.stack.addWidget(v)
+                v.status.connect(lambda m: self.statusBar().showMessage(m))
+            self.history = []                  # (file, line) for Alt+Left
+            self.viewer.viewport().installEventFilter(self)
+            self.bigviewer.viewport().installEventFilter(self)
             self.pathlabel = QLabel("", objectName="pathlabel")
             right = QWidget()
             rv = QVBoxLayout(right)
@@ -376,7 +393,11 @@ def main():
             self.binlabel = QLabel("This is a native binary. Turn it into C code:")
             self.btn_decomp = QPushButton("Decompile this binary", objectName="primary", clicked=self.decompile_current,
                                           toolTip="Run Ghidra on this file (Ctrl+D)")
+            self.btn_alt = QPushButton("Hex view", clicked=self.toggle_view)
+            self.btn_info = QPushButton("File info", clicked=self.file_info, toolTip="Type, size, MD5/SHA-1/SHA-256, entropy (Ctrl+I)")
             bb.addWidget(self.binlabel, 1)
+            bb.addWidget(self.btn_alt)
+            bb.addWidget(self.btn_info)
             bb.addWidget(self.btn_decomp)
             rv.addWidget(self.binbar)
             self.binbar.hide()
@@ -606,10 +627,215 @@ def main():
                 self.btn_decomp.setText("Extract assets")
                 self.btn_decomp.show()
             else:
-                self.binlabel.setText("Data file, not code: there is nothing to decompile. A hex view is shown below.")
+                self.binlabel.setText("Data file, not code: nothing to decompile. Click a byte to inspect it, "
+                                      "click the entropy strip to jump.")
                 self.btn_decomp.hide()
+            mk = viewers.kind_of(p)
+            self.btn_alt.setVisible(bool(mk))
+            self.btn_alt.setText("Preview")
+            self.btn_info.show()
             self.binbar.show()
             return kind
+
+        def _media_bar(self, p, mk):
+            self.binlabel.setText({
+                "image": "Image: wheel to zoom, drag to pan, double-click for 1:1 / fit. Pixel colours show below.",
+                "audio": "Sound: Play, or click the waveform to jump.",
+                "model": "3D model: drag to rotate, wheel to zoom, double-click for wireframe.",
+                "font": "Font preview."}[mk])
+            self.btn_decomp.hide()
+            self.btn_alt.setText("View as text" if mk == "model" else "Hex view")
+            self.btn_alt.show()
+            self.btn_info.show()
+            self.binbar.show()
+
+        def toggle_view(self):
+            cur = getattr(self, "cur_file", None)
+            if not cur:
+                return
+            w = self.stack.currentWidget()
+            if w in self.media.values():
+                self.show_file(cur[0], as_="text" if w is self.modview else "hex")
+            else:
+                self.show_file(cur[0])
+
+        def file_info(self):
+            cur = getattr(self, "cur_file", None)
+            if not cur or not os.path.isfile(cur[0]):
+                self.statusBar().showMessage("Open a file first")
+                return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                rows = viewers.facts(cur[0])
+            finally:
+                QApplication.restoreOverrideCursor()
+            text = Path(cur[0]).name + "\n\n" + "\n".join(f"{k + ':':<9} {v}" for k, v in rows)
+            box = QMessageBox(self)
+            box.setWindowTitle("File info")
+            box.setText(f"<pre style='font-family:monospace'>{html.escape(text)}</pre>")
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            copy = box.addButton("Copy", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Close)
+            box.exec()
+            if box.clickedButton() is copy:
+                QApplication.clipboard().setText(text)
+                self.statusBar().showMessage("File info copied")
+
+        # -------- navigation: function list, go to definition, back
+        def _func_index(self, p):
+            """[(name, addr, file, line)] for the current file, or for every part of a split decompile."""
+            import re as _re
+            p = Path(p)
+            files = sorted(p.parent.glob("part_*.c")) if p.parent.name == "decompiled" else [p]
+            if p.name == "decompiled.c" and (p.parent / "decompiled").is_dir():
+                files = sorted((p.parent / "decompiled").glob("part_*.c"))
+            key = tuple((str(f), f.stat().st_mtime) for f in files if f.exists())
+            cache = getattr(self, "_fcache", {})
+            if key in cache:
+                return cache[key]
+            c_re = _re.compile(r"^// ---- (.+?) @ ([0-9a-fA-F]+) ----$")
+            asm_re = _re.compile(r"^; (\S+)\s+@ (0x[0-9a-fA-F]+)")
+            j_re = _re.compile(r"^\s*(?:(?:public|private|protected|static|final|synchronized|abstract|native|override|"
+                               r"internal|virtual|async|unsafe)\s+)*(?:[\w<>\[\],.?]+\s+)+(\w+)\s*\([^;]*\)\s*(?:throws [\w., ]+)?\{?\s*$")
+            cls_re = _re.compile(r"^\s*(?:public |private |protected |static |final |abstract |sealed |internal )*"
+                                 r"(?:class|interface|enum|struct|record)\s+(\w+)")
+            out = []
+            for f in files:
+                try:
+                    with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                        for i, line in enumerate(fh, 1):
+                            if not line or line[0] not in "/; \tpubliprosfaintevcd":
+                                continue
+                            m = c_re.match(line) or asm_re.match(line)
+                            if m:
+                                out.append((m.group(1), m.group(2), str(f), i))
+                                continue
+                            if f.suffix in (".java", ".cs", ".kt"):
+                                m = cls_re.match(line)
+                                if m:
+                                    out.append((m.group(1), "class", str(f), i))
+                                    continue
+                                m = j_re.match(line)
+                                if m and m.group(1) not in ("if", "for", "while", "switch", "catch", "return", "new", "synchronized"):
+                                    out.append((m.group(1), "", str(f), i))
+                except OSError:
+                    pass
+            cache[key] = out
+            self._fcache = cache
+            return out
+
+        def _jump(self, f, line):
+            cur = getattr(self, "cur_file", None)
+            if cur:
+                w = self.stack.currentWidget()
+                at = w.textCursor().blockNumber() + 1 if hasattr(w, "textCursor") else cur[1]
+                self.history.append((cur[0], at))
+            if not cur or cur[0] != f or self.stack.currentWidget() not in (self.viewer, self.bigviewer):
+                self.show_file(f)
+                idx = self.model.index(f)
+                self.tree.scrollTo(idx)
+                self.tree.setCurrentIndex(idx)
+            self.goto_line(line)
+
+        def go_back(self):
+            if not self.history:
+                self.statusBar().showMessage("Nothing to go back to")
+                return
+            f, line = self.history.pop()
+            self.show_file(f)
+            if line:
+                self.goto_line(line)
+
+        def eventFilter(self, obj, ev):
+            # double-click (or Ctrl+click) a function name in the code: jump to where it is defined
+            from PySide6.QtCore import QEvent, QTimer
+            if obj in (self.viewer.viewport(), self.bigviewer.viewport()):
+                t = ev.type()
+                if t == QEvent.MouseButtonDblClick or (t == QEvent.MouseButtonRelease and ev.modifiers() & Qt.ControlModifier):
+                    QTimer.singleShot(0, lambda: self.goto_definition(quiet=True))
+            return super().eventFilter(obj, ev)
+
+        def goto_definition(self, word=None, quiet=False):
+            from PySide6.QtGui import QTextCursor
+            cur = getattr(self, "cur_file", None)
+            w = self.stack.currentWidget()
+            if not cur or not hasattr(w, "textCursor"):
+                return
+            if not word:
+                c = w.textCursor()
+                c.select(QTextCursor.WordUnderCursor)
+                word = c.selectedText().strip()
+            if not word:
+                return
+            hits = [e for e in self._func_index(cur[0]) if e[0] == word]
+            if not hits and word.startswith(("FUN_", "sub_")):
+                addr = word.split("_", 1)[1].lower().lstrip("0")
+                hits = [e for e in self._func_index(cur[0]) if e[1].lower().lstrip("0") == addr]
+            if not hits:
+                if not quiet:
+                    self.statusBar().showMessage(f"No definition of {word} found here")
+                return
+            name, addr, f, line = hits[0]
+            self._jump(f, line)
+            self.statusBar().showMessage(f"{name}" + (f" @ {addr}" if addr else "") + "   (Alt+Left to go back)")
+
+        def goto_dialog(self):
+            from PySide6.QtWidgets import QDialog, QInputDialog
+            cur = getattr(self, "cur_file", None)
+            if not cur:
+                self.statusBar().showMessage("Open a file first")
+                return
+            if self.stack.currentWidget() is self.hexview:
+                text, ok = QInputDialog.getText(self, "Go to offset", "Offset (hex like 0x1f00, or decimal):")
+                if ok and text.strip():
+                    try:
+                        t = text.strip().lower()
+                        off = int(t, 16) if t.startswith("0x") or any(ch in "abcdef" for ch in t) else int(t)
+                        self.hexview.goto(off)
+                    except ValueError:
+                        self.statusBar().showMessage("Not a number: " + text)
+                return
+            funcs = self._func_index(cur[0])
+            if not funcs:
+                self.statusBar().showMessage("No functions found in this file")
+                return
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Go to function  ({len(funcs):,})")
+            dlg.resize(560, 520)
+            lay = QVBoxLayout(dlg)
+            flt = QLineEdit(placeholderText="Type to filter by name or address...")
+            lst = QListWidget()
+            lay.addWidget(flt)
+            lay.addWidget(lst)
+
+            def fill(q=""):
+                lst.clear()
+                ql = q.lower()
+                n = 0
+                for e in funcs:
+                    if ql in e[0].lower() or (e[1] and ql in e[1].lower()):
+                        it = QListWidgetItem(f"{e[0]}" + (f"    {e[1]}" if e[1] else "") +
+                                             (f"    ({Path(e[2]).name})" if Path(e[2]).name != Path(cur[0]).name else ""))
+                        it.setData(Qt.UserRole, e)
+                        lst.addItem(it)
+                        n += 1
+                        if n >= 3000:
+                            break
+                if lst.count():
+                    lst.setCurrentRow(0)
+
+            def go(*_):
+                it = lst.currentItem()
+                if it:
+                    e = it.data(Qt.UserRole)
+                    dlg.accept()
+                    self._jump(e[2], e[3])
+
+            flt.textChanged.connect(fill)
+            flt.returnPressed.connect(go)
+            lst.itemActivated.connect(go)
+            fill()
+            dlg.exec()
 
         def decompile_selected(self):
             p = self._selected_binary()
@@ -814,18 +1040,12 @@ def main():
             self.statusBar().showMessage(f"Theme: {name}")
 
         def show_binary_hit(self, p, off, n):
-            """A search hit inside a binary: say where it is, show the readable text around it and a hex dump."""
+            """A search hit inside a binary: open the hex view at the match, say which section it is in."""
             self.cur_file = (p, None)
             self.pathlabel.show()
             self._show_bar(p)
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
             self.pathlabel.setText(f"{rel}  @ 0x{off:x}")
-            self.stack.setCurrentWidget(self.viewer)
-            with open(p, "rb") as f:
-                size = os.path.getsize(p)
-                f.seek(max(0, off - 400))
-                base = max(0, off - 400)
-                data = f.read(900)
             where = ""
             try:
                 from elftools.elf.elffile import ELFFile
@@ -833,37 +1053,36 @@ def main():
                     for sec in ELFFile(f).iter_sections():
                         a, sz = sec["sh_offset"], sec["sh_size"]
                         if sec["sh_type"] != "SHT_NOBITS" and a <= off < a + sz:
-                            where = f"  in section {sec.name}"
+                            where = f" in section {sec.name}"
                             break
             except Exception:
                 pass
-            def readable(b):
-                out = []
-                for i in range(0, len(b)):
-                    c = b[i]
-                    out.append(chr(c) if 32 <= c < 127 else ("\n" if c in (10, 13) else "\0"))
-                text = "".join(out)
-                return [t.strip() for t in text.replace("\0", "\n").split("\n") if len(t.strip()) >= 3]
-            lines = [f"Match at byte offset 0x{off:x} ({off:,}) of {size:,}{where}", "",
-                     "Text stored around it (compiled code has no source lines; this is the data next to the match):", ""]
-            lines += ["    " + t for t in readable(data)] or ["    (nothing readable)"]
-            lines += ["", "Hex dump (the match starts at the marked offset):", ""]
-            for i in range(0, len(data), 16):
-                row = data[i:i + 16]
-                hx = " ".join(f"{b:02x}" for b in row).ljust(47)
-                asc = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-                mark = ">" if base + i <= off < base + i + 16 else " "
-                lines.append(f"{mark}{base + i:08x}  {hx}  {asc}")
-            lines += ["", "To read this as code: double-click the file in the tree (Ctrl+D) to decompile it with Ghidra.",
-                      "For Flutter apps the same text is also listed in maincode/flutter/strings.txt."]
-            self.viewer.setPlainText("\n".join(lines))
+            with open(p, "rb") as f:
+                head = f.read(64)
+            self.hexview.load(p, header=f"{viewers.describe(head, p)}   ·   match at 0x{off:x}{where}")
+            self.stack.setCurrentWidget(self.hexview)
+            self.hexview.goto(off, n)
+            self.hexview.setFocus()
 
-        def show_file(self, p, line=None):
+        def show_file(self, p, line=None, as_=None):
             if isinstance(line, tuple) and line and line[0] == "bin":
                 self.show_binary_hit(p, line[1], line[2])
                 return
             self.cur_file = (p, line)
             self.binbar.hide()
+            mk = viewers.kind_of(p) if as_ is None else None
+            if mk:
+                try:
+                    ok = self.media[mk].load(p)
+                except Exception as e:
+                    ok = False
+                    self.statusBar().showMessage(f"Preview failed: {e}")
+                if ok:
+                    self.pathlabel.show()
+                    self.pathlabel.setText(os.path.relpath(p, self.out_dir) if self.out_dir else p)
+                    self._media_bar(p, mk)
+                    self.stack.setCurrentWidget(self.media[mk])
+                    return
             self.pathlabel.show()
             rel = os.path.relpath(p, self.out_dir) if self.out_dir else p
             try:
@@ -874,22 +1093,12 @@ def main():
                 self.stack.setCurrentWidget(self.viewer)
                 self.viewer.setPlainText(str(e))
                 return
-            if _looks_binary(head):
+            if as_ == "hex" or (as_ != "text" and _looks_binary(head)):
                 self.pathlabel.setText(rel)
-                kind = self._show_bar(p)
-                self.stack.setCurrentWidget(self.viewer)
-                msg = f"[binary file, {size:,} bytes]\n\n"
-                if kind == "native":
-                    msg += ("Press 'Decompile this binary' above (or double-click the file in the tree, or Ctrl+D).\n"
-                            "Ghidra does the work; big files take a while. The result goes into the 'native' folder.\n\n")
-                elif kind == "unity":
-                    msg += ("Press 'Extract assets' above (or double-click the file in the tree, or Ctrl+D) to get its images (PNG),\n"
-                            "sounds (WAV), models (OBJ), text and script data (JSON) in the 'unity_assets' folder.\n"
-                            "Pieces like name.assets.split0, .split1, ... are joined automatically.\n"
-                            "The game's code is not in here: for Unity (IL2CPP) games it is libil2cpp.so, and its class and\n"
-                            "method names are in maincode/unity.\n\n")
-                msg += "First bytes:\n\n" + _hexdump(head[:512])
-                self.viewer.setPlainText(msg)
+                self._show_bar(p)
+                self.hexview.load(p, header=f"{viewers.describe(head[:64], p)}   ·   {size:,} bytes")
+                self.stack.setCurrentWidget(self.hexview)
+                self.hexview.setFocus()
                 return
             if size > HIGHLIGHT_LIMIT:
                 self.pathlabel.setText(f"{rel}   ({size / 1e6:.1f} MB, syntax colors off for speed)")

@@ -94,6 +94,9 @@ def extract(path, root, log, check_cancel=lambda: None):
     counts, index, made = {}, [], 0
     used = set()
     objs = list(env.objects)
+    if not objs:
+        log("No objects inside this file. It is probably raw data that another asset file points to "
+            "(open the .assets / bundle file next to it instead).")
     log(f"{len(objs)} object(s) inside. Extracting textures, sprites, sounds, text, models and script data...")
     for n, obj in enumerate(objs, 1):
         check_cancel()
